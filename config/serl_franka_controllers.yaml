@@ -1,22 +1,48 @@
-joint_position_controller:
-    type: serl_franka_controllers/JointPositionController
-    joint_names:
-        - panda_joint1
-        - panda_joint2
-        - panda_joint3
-        - panda_joint4
-        - panda_joint5
-        - panda_joint6
-        - panda_joint7
+/**:
+  controller_manager:
+    ros__parameters:
+      update_rate: 1000
+      thread_priority: 98
 
-cartesian_impedance_controller:
-    type: serl_franka_controllers/CartesianImpedanceController
-    arm_id: panda
-    joint_names:
-        - panda_joint1
-        - panda_joint2
-        - panda_joint3
-        - panda_joint4
-        - panda_joint5
-        - panda_joint6
-        - panda_joint7
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+
+      franka_robot_state_broadcaster:
+        type: franka_robot_state_broadcaster/FrankaRobotStateBroadcaster
+
+      joint_position_controller:
+        type: serl_franka_controllers/JointPositionController
+
+      cartesian_impedance_controller:
+        type: serl_franka_controllers/CartesianImpedanceController
+
+/**:
+  franka_robot_state_broadcaster:
+    ros__parameters:
+      arm_id: "fr3"
+      lock_try_count: 5
+      lock_sleep_interval: 5
+      lock_log_error: true
+      lock_update_success: false
+
+/**:
+  joint_state_broadcaster:
+    ros__parameters:
+      joints:
+        - fr3_joint1
+        - fr3_joint2
+        - fr3_joint3
+        - fr3_joint4
+        - fr3_joint5
+        - fr3_joint6
+        - fr3_joint7
+
+/**:
+  joint_position_controller:
+    ros__parameters:
+      arm_id: "fr3"
+
+/**:
+  cartesian_impedance_controller:
+    ros__parameters:
+      arm_id: "fr3"

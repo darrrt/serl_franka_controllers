@@ -1,116 +1,148 @@
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.8)
 project(serl_franka_controllers)
 
-set(CMAKE_BUILD_TYPE Release)
-set(CMAKE_CXX_STANDARD 20)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+if(NOT CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 17)
+  set(CMAKE_CXX_STANDARD_REQUIRED ON)
+endif()
 
-find_package(catkin REQUIRED COMPONENTS
-  controller_interface
-  dynamic_reconfigure
-  eigen_conversions
-  franka_hw
-  franka_gripper
-  geometry_msgs
-  hardware_interface
-  tf
-  tf_conversions
-  message_generation
-  pluginlib
-  realtime_tools
-  roscpp
-  rospy
-)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
+find_package(ament_cmake REQUIRED)
+find_package(rosidl_typesupport_fastrtps_cpp REQUIRED)
+find_package(controller_interface REQUIRED)
+find_package(franka_msgs REQUIRED)
+find_package(franka_semantic_components REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(hardware_interface REQUIRED)
+find_package(pluginlib REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_lifecycle REQUIRED)
+find_package(realtime_tools REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(Franka 0.7.0 REQUIRED)
 
-add_message_files(FILES ZeroJacobian.msg)
-generate_messages()
-
-generate_dynamic_reconfigure_options(
-  cfg/compliance_param.cfg
+rosidl_generate_interfaces(${PROJECT_NAME}_msgs
+  "msg/ZeroJacobian.msg"
+  DEPENDENCIES std_msgs
 )
 
-catkin_package(
-  INCLUDE_DIRS include
-  LIBRARIES serl_franka_controllers
-  CATKIN_DEPENDS
-    controller_interface
-    dynamic_reconfigure
-    eigen_conversions
-    franka_hw
-    franka_gripper
-    geometry_msgs
-    hardware_interface
-    tf
-    tf_conversions
-    message_runtime
-    pluginlib
-    realtime_tools
-    roscpp
-  DEPENDS Franka
-)
-
-add_library(serl_franka_controllers
+add_library(${PROJECT_NAME} SHARED
   src/joint_position_controller.cpp
   src/cartesian_impedance_controller.cpp
-  )
-
-add_dependencies(serl_franka_controllers
-  ${${PROJECT_NAME}_EXPORTED_TARGETS}
-  ${catkin_EXPORTED_TARGETS}
-  ${PROJECT_NAME}_generate_messages_cpp
-  ${PROJECT_NAME}_gencpp
-  ${PROJECT_NAME}_gencfg
 )
 
-target_link_libraries(serl_franka_controllers PUBLIC
-  ${Franka_LIBRARIES}
-  ${catkin_LIBRARIES}
-)
-
-target_include_directories(serl_franka_controllers SYSTEM PUBLIC
-  ${Franka_INCLUDE_DIRS}
-  ${EIGEN3_INCLUDE_DIRS}
-  ${catkin_INCLUDE_DIRS}
-)
-target_include_directories(serl_franka_controllers PUBLIC
+target_include_directories(${PROJECT_NAME} PUBLIC
   include
+  ${EIGEN3_INCLUDE_DIRS}
 )
 
-## Installation
-install(TARGETS serl_franka_controllers
-  ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-)
-install(DIRECTORY include/${PROJECT_NAME}/
-  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-)
-# install(DIRECTORY launch
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
-install(DIRECTORY config
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-)
-install(FILES serl_franka_controllers_plugin.xml
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+ament_target_dependencies(${PROJECT_NAME}
+  rosidl_typesupport_fastrtps_cpp
+  controller_interface
+  franka_semantic_components
+  geometry_msgs
+  hardware_interface
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
+  realtime_tools
+  std_srvs
 )
 
-## Tools
-include(${CMAKE_CURRENT_LIST_DIR}/../cmake/ClangTools.cmake OPTIONAL
-  RESULT_VARIABLE CLANG_TOOLS
+rosidl_get_typesupport_target(cpp_typesupport_target
+  ${PROJECT_NAME}_msgs "rosidl_typesupport_cpp")
+rosidl_get_typesupport_target(fastrtps_cpp_typesupport_target
+  ${PROJECT_NAME}_msgs "rosidl_typesupport_fastrtps_cpp")
+
+target_link_libraries(${PROJECT_NAME}
+  ${cpp_typesupport_target}
+  ${fastrtps_cpp_typesupport_target}
+  ${Franka_LIBRARIES}
 )
-if(CLANG_TOOLS)
-  file(GLOB_RECURSE SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp)
-  file(GLOB_RECURSE HEADERS
-    ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/*.h
-  )
-  add_format_target(serl_franka_controllers FILES ${SOURCES} ${HEADERS})
-  add_tidy_target(serl_franka_controllers
-    FILES ${SOURCES}
-    DEPENDS serl_franka_controllers
-  )
-endif()
+
+target_include_directories(${PROJECT_NAME} SYSTEM PUBLIC
+  ${Franka_INCLUDE_DIRS}
+)
+
+pluginlib_export_plugin_description_file(
+  controller_interface serl_franka_controllers_plugin.xml)
+
+set_target_properties(${PROJECT_NAME} PROPERTIES
+  BUILD_RPATH "$ORIGIN/../lib"
+  INSTALL_RPATH "$ORIGIN/../lib"
+)
+
+install(
+  TARGETS ${PROJECT_NAME}
+  RUNTIME DESTINATION bin
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+)
+
+install(
+  DIRECTORY include/
+  DESTINATION include
+)
+
+install(
+  DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_export_include_directories(include)
+ament_export_libraries(${PROJECT_NAME})
+ament_export_dependencies(
+  rosidl_typesupport_fastrtps_cpp
+  controller_interface
+  franka_semantic_components
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
+  hardware_interface
+)
+
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \
+  libserl_franka_controllers_msgs__rosidl_generator_c.so \
+  libserl_franka_controllers__rosidl_generator_c.so \
+  WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/lib)")
+
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \
+  libserl_franka_controllers_msgs__rosidl_typesupport_cpp.so \
+  libserl_franka_controllers__rosidl_typesupport_cpp.so \
+  WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/lib)")
+
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \
+  libserl_franka_controllers_msgs__rosidl_typesupport_c.so \
+  libserl_franka_controllers__rosidl_typesupport_c.so \
+  WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/lib)")
+
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \
+  libserl_franka_controllers_msgs__rosidl_typesupport_fastrtps_cpp.so \
+  libserl_franka_controllers__rosidl_typesupport_fastrtps_cpp.so \
+  WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/lib)")
+
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \
+  libserl_franka_controllers_msgs__rosidl_typesupport_fastrtps_c.so \
+  libserl_franka_controllers__rosidl_typesupport_fastrtps_c.so \
+  WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/lib)")
+
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \
+  libserl_franka_controllers_msgs__rosidl_typesupport_introspection_cpp.so \
+  libserl_franka_controllers__rosidl_typesupport_introspection_cpp.so \
+  WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/lib)")
+
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink \
+  libserl_franka_controllers_msgs__rosidl_typesupport_introspection_c.so \
+  libserl_franka_controllers__rosidl_typesupport_introspection_c.so \
+  WORKING_DIRECTORY ${CMAKE_INSTALL_PREFIX}/lib)")
+
+ament_package()
