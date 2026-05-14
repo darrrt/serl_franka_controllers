@@ -47,10 +47,18 @@ source install/setup.bash
 source /opt/ros/humble/setup.bash
 source ~/hil-serl-ros2/ros2_ws/install/setup.bash
 
+ros2 launch serl_franka_controllers impedance.launch.py robot_ip:=10.42.0.163 arm_id:=fr3 load_gripper:=true
+
 ros2 launch serl_franka_controllers impedance.launch.py \
     robot_ip:=10.42.0.163 \
     arm_id:=fr3 \
     load_gripper:=true
+
+# joint stae controller 改写为 effort（力矩）PD 控制模式；完全绕过 Franka 内部 motion generator 。 这样不会有差值过程导致的 jerk极大的问题
+# 不然会报错 joint_motion_generator_acceleration_discontinuity
+
+source install/setup.bash
+ros2 launch serl_franka_controllers joint.launch.py robot_ip:=10.42.0.163 arm_id:=fr3 load_gripper:=true
 ```
 
 | 参数 | 说明 | 默认值 |
@@ -273,3 +281,20 @@ python franka_server.py --robot_ip=173.16.0.2 --flask_url=0.0.0.0:5001
 | 获取机器人状态 | `franka_msgs/FrankaState`（O_T_EE 为 float64[16]） | `franka_msgs/FrankaRobotState`（O_T_EE 为 PoseStamped） |
 | 手爪控制 | 发布 `GraspActionGoal` 到 topic | 使用 `franka_msgs/action/Grasp` ActionClient |
 | 错误恢复 | 发布 `ErrorRecoveryActionGoal` | 使用 `franka_msgs/action/ErrorRecovery` ActionClient |
+
+
+### 3. ⚠️ Gripper 方案2 — 不修改外部包不可行
+
+`FrankaHardwareInterface` 的 `command_interfaces_info_` 硬编码为 `kNumberOfJoints = 7` 个关节（[franka_hardware_interface.cpp:L79](file:///home/xusj/hil-serl-ros2/ros2_ws/src/franka_ros2/franka_hardware/src/franka_hardware_interface.cpp#L79)）。如果控制器同时声明 arm + gripper = 8 个 effort 接口，`prepare_command_mode_switch` 的校验会失败。需要修改 `franka_hardware`。
+
+**推荐替代方案：** `franka_gripper` 的 position-force hybrid 模式已经可以实现类似阻抗的效果：
+
+```bash
+# 柔顺抓取（5N 微小力）
+ros2 action send_goal /franka_gripper/grasp franka_gripper/GraspAction \
+  "{width: 0.02, speed: 0.05, force: 5.0, epsilon: {inner: 0.005, outer: 0.005}}"
+```
+
+---
+
+**下一步：先执行 `sudo cpupower frequency-set -g performance` 再启动测试。** 这应该能解决 `communication_constraints_violation` 的问题。

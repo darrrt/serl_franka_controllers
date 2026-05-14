@@ -25,12 +25,14 @@ class JointPositionController : public controller_interface::ControllerInterface
   CallbackReturn on_activate(const rclcpp_lifecycle::State& previous_state) override;
 
  private:
-  double cubicInterpolation(double p0, double p1, double t);
   std::string arm_id_;
   const int num_joints_ = 7;
+  const double motion_duration_ = 10.0;
   rclcpp::Duration elapsed_time_ = rclcpp::Duration(0, 0);
   std::array<double, 7> initial_pose_{};
-  std::array<double, 7> reset_pose_{};
+  std::array<double, 7> target_pose_{};
+  std::array<double, 7> k_gains_{};
+  std::array<double, 7> d_gains_{};
 };
 
 }  // namespace serl_franka_controllers
