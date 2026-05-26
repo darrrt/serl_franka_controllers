@@ -85,7 +85,7 @@ def generate_robot_nodes(context):
             package='controller_manager',
             executable='spawner',
             namespace=namespace,
-            arguments=['joint_position_controller'],
+            arguments=['joint_position_oscillation_controller'],
             output='screen',
         ),
         IncludeLaunchDescription(

@@ -4,9 +4,19 @@
       A controller that executes a short motion based on joint positions to demonstrate correct usage
     </description>
   </class>
+  <class name="serl_franka_controllers/JointPositionOscillationController" type="serl_franka_controllers::JointPositionOscillationController" base_class_type="controller_interface::ControllerInterface">
+    <description>
+      A controller that oscillates between two joint position targets using quintic polynomial interpolation
+    </description>
+  </class>
   <class name="serl_franka_controllers/CartesianImpedanceController" type="serl_franka_controllers::CartesianImpedanceController" base_class_type="controller_interface::ControllerInterface">
     <description>
       A controller that renders a spring damper system in cartesian space. Compliance parameters and the equilibrium pose can be modified online with dynamic reconfigure and an interactive marker respectively.
+    </description>
+  </class>
+  <class name="serl_franka_controllers/ForceSlideController" type="serl_franka_controllers::ForceSlideController" base_class_type="controller_interface::ControllerInterface">
+    <description>
+      A controller that descends vertically until contact, then slides horizontally while maintaining contact force. Implements a state machine: DESCEND -> SLIDE -> DONE.
     </description>
   </class>
 </library>

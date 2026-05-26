@@ -63,7 +63,7 @@ ros2 launch serl_franka_controllers joint.launch.py robot_ip:=10.42.0.163 arm_id
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
-| `robot_ip` | 机器人控制器的 IP 地址 | `172.16.0.3` |
+| `robot_ip` | 机器人控制器的 IP 地址 | `10.42.0.163` |
 | `arm_id` | 机械臂型号 (`fr3` / `panda`) | `fr3` |
 | `namespace` | 机器人命名空间（多机器人场景） | `""` |
 | `load_gripper` | 是否加载 Franka 手爪 | `true` |
