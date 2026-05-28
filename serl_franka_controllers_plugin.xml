@@ -14,6 +14,11 @@
       A controller that renders a spring damper system in cartesian space. Compliance parameters and the equilibrium pose can be modified online with dynamic reconfigure and an interactive marker respectively.
     </description>
   </class>
+  <class name="serl_franka_controllers/JointForceSlideController" type="serl_franka_controllers::JointForceSlideController" base_class_type="controller_interface::ControllerInterface">
+    <description>
+      A controller that cycles: joint move to start pose -> descend until contact -> slide horizontally maintaining force -> return to start. Implements a state machine: JOINT_MOVE -> SETTLE -> DESCEND -> SLIDE -> JOINT_MOVE.
+    </description>
+  </class>
   <class name="serl_franka_controllers/ForceSlideController" type="serl_franka_controllers::ForceSlideController" base_class_type="controller_interface::ControllerInterface">
     <description>
       A controller that descends vertically until contact, then slides horizontally while maintaining contact force. Implements a state machine: DESCEND -> SLIDE -> DONE.

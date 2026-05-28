@@ -1,3 +1,6 @@
+import os
+import re
+import tempfile
 import xacro
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, Shutdown
@@ -29,10 +32,24 @@ def generate_robot_nodes(context):
     ).toprettyxml(indent='  ')
 
     namespace = LaunchConfiguration('namespace').perform(context)
+    start_phase = LaunchConfiguration('start_phase').perform(context)
+
     controllers_yaml = PathJoinSubstitution([
         FindPackageShare('serl_franka_controllers'), 'config',
         'serl_franka_controllers.yaml'
     ]).perform(context)
+
+    with open(controllers_yaml, 'r') as f:
+        yaml_content = f.read()
+
+    if start_phase != 'joint_move':
+        pattern = r'(joint_force_slide_controller:.*?start_phase:\s*)"[^"]*"'
+        replacement = r'\1"' + start_phase + '"'
+        yaml_content = re.sub(pattern, replacement, yaml_content, flags=re.DOTALL)
+
+    temp_yaml_fd, temp_yaml_path = tempfile.mkstemp(suffix='.yaml', prefix='serl_franka_')
+    with os.fdopen(temp_yaml_fd, 'w') as f:
+        f.write(yaml_content)
 
     joint_state_publisher_sources = ['franka/joint_states', 'franka_gripper/joint_states']
 
@@ -49,7 +66,7 @@ def generate_robot_nodes(context):
             executable='ros2_control_node',
             namespace=namespace,
             parameters=[
-                controllers_yaml,
+                temp_yaml_path,
                 {'robot_description': robot_description},
                 {'load_gripper': load_gripper}],
             remappings=[('joint_states', joint_state_publisher_sources[0])],
@@ -79,14 +96,13 @@ def generate_robot_nodes(context):
             executable='spawner',
             namespace=namespace,
             arguments=['franka_robot_state_broadcaster'],
-            parameters=[{'arm_id': LaunchConfiguration('arm_id').perform(context)}],
             output='screen',
         ),
         Node(
             package='controller_manager',
             executable='spawner',
             namespace=namespace,
-            arguments=['cartesian_impedance_controller'],
+            arguments=['joint_force_slide_controller'],
             output='screen',
         ),
         IncludeLaunchDescription(
@@ -124,6 +140,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_fake_hardware',
                               default_value='false',
                               description='Use fake hardware'),
+        DeclareLaunchArgument('start_phase',
+                              default_value='joint_move',
+                              description='Starting phase: joint_move, settle, descend, slide'),
     ]
 
     return LaunchDescription(launch_args + [OpaqueFunction(function=generate_robot_nodes)])

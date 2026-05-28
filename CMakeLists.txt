@@ -34,7 +34,7 @@ add_library(${PROJECT_NAME} SHARED
   src/joint_position_controller.cpp
   src/joint_position_oscillation_controller.cpp
   src/cartesian_impedance_controller.cpp
-  src/force_slide_controller.cpp
+  src/joint_force_slide_controller.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -100,10 +100,7 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
-install(
-  PROGRAMS scripts/force_slide_orchestrator.py
-  DESTINATION lib/${PROJECT_NAME}
-)
+
 
 ament_export_include_directories(include)
 ament_export_libraries(${PROJECT_NAME})

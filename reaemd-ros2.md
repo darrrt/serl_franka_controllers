@@ -1,3 +1,6 @@
+ colcon build --symlink-install  --cmake-args -DCMAKE_BUILD_TYPE=Release
+ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF
+
 filePath: /home/xusj/hil-serl-ros2/ros2_ws/src/franka_ros2/franka_bringup/launch/franka.launch.py
 
 # 立即生效
