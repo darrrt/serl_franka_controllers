@@ -25,6 +25,9 @@
       joint_force_slide_controller:
         type: serl_franka_controllers/JointForceSlideController
 
+      data_collection_controller:
+        type: serl_franka_controllers/DataCollectionController
+
 /**:
   franka_robot_state_broadcaster:
     ros__parameters:
@@ -89,22 +92,60 @@
       force_kp: 0.005
       force_ki: 0.01
       force_filter_alpha: 0.1
-      max_descend_distance: 0.15
+      max_descend_distance: 0.25
+      slide_waypoints: [0.05, 0.0, 0.05, 0.05]
       translational_stiffness_xy: 2000.0
       translational_stiffness_z_settle: 2000.0
       translational_stiffness_z_descend: 1500.0
-      translational_stiffness_z_slide: 200.0
+      translational_stiffness_z_slide: 1500.0
       rotational_stiffness: 150.0
       translational_damping_xy: 89.0
       translational_damping_z_settle: 89.0
       translational_damping_z_descend: 60.0
-      translational_damping_z_slide: 30.0
+      translational_damping_z_slide: 60.0
       rotational_damping: 7.0
       nullspace_stiffness: 20.0
       joint1_nullspace_stiffness: 20.0
-      max_joint_velocity: 2.0       # rad/s - 关节速度上限
-      max_cartesian_velocity: 0.5   # m/s - 末端线速度上限
-      max_torque: 30.0              # Nm - 关节力矩上限
+
+/**:
+  data_collection_controller:
+    ros__parameters:
+      arm_id: "fr3"
+      grasp_width: 0.0
+      grasp_force: 50.0
+      grasp_speed: 0.1
+      grasp_epsilon_inner: 0.005
+      grasp_epsilon_outer: 0.005
+      max_grasp_attempts: 3
+      gripper_action_prefix: "franka_gripper"
+      teach_damping_translational: 10.0
+      teach_damping_rotational: 1.0
+      calib_rise_height: 0.15
+      calib_settle_cycles: 1000
+      default_dx: 0.01
+      default_dy: 0.0
+      default_dx_step: 0.01
+      default_dy_step: 0.0
+      default_f0: 1.0
+      target_force: 1.0
+      descend_speed: 0.005
+      slide_speed: 0.01
+      force_kp: 0.005
+      force_ki: 0.01
+      force_filter_alpha: 0.1
+      max_descend_distance: 0.25
+      approach_height: 0.05
+      translational_stiffness_xy: 2000.0
+      translational_stiffness_z: 1500.0
+      rotational_stiffness: 150.0
+      translational_damping_xy: 89.0
+      translational_damping_z: 60.0
+      rotational_damping: 7.0
+      nullspace_stiffness: 20.0
+      joint1_nullspace_stiffness: 20.0
+      max_joint_velocity: 2.0
+      max_cartesian_velocity: 0.5
+      max_torque: 30.0
 
 /**:
   force_slide_controller:

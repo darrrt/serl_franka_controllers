@@ -1,3 +1,9 @@
+// colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF\
+1. 将机械臂运动到sta人物的起始位置 2. 让机械臂末端z轴竖直向下 3. 遇到阻力或下降超过一定高度后 停止 4. 控制机械臂在 xy平面滑动。
+// ros2 launch serl_franka_controllers joint_force_slide.launch.py start_phase:=descend
+// ros2 launch serl_franka_controllers joint_force_slide.launch.py start_phase:=settle
+// ros2 launch serl_franka_controllers joint_force_slide.launch.py start_phase:=slide
+// ros2 launch serl_franka_controllers joint_force_slide.launch.py
 #include <serl_franka_controllers/joint_force_slide_controller.h>
 
 #include <bitset>
@@ -84,17 +90,18 @@ CallbackReturn JointForceSlideController::on_init() {
     auto_declare<double>("force_kp", 0.005);
     auto_declare<double>("force_ki", 0.01);
     auto_declare<double>("force_filter_alpha", 0.1);
-    auto_declare<double>("max_descend_distance", 0.15);
+    auto_declare<double>("max_descend_distance", 0.25);
+    auto_declare<std::vector<double>>("slide_waypoints", {0.05, 0.0, 0.05, 0.05});
 
     auto_declare<double>("translational_stiffness_xy", 2000.0);
     auto_declare<double>("translational_stiffness_z_settle", 2000.0);
     auto_declare<double>("translational_stiffness_z_descend", 1500.0);
-    auto_declare<double>("translational_stiffness_z_slide", 200.0);
+    auto_declare<double>("translational_stiffness_z_slide", 1500.0);
     auto_declare<double>("rotational_stiffness", 150.0);
     auto_declare<double>("translational_damping_xy", 89.0);
     auto_declare<double>("translational_damping_z_settle", 89.0);
     auto_declare<double>("translational_damping_z_descend", 60.0);
-    auto_declare<double>("translational_damping_z_slide", 30.0);
+    auto_declare<double>("translational_damping_z_slide", 60.0);
     auto_declare<double>("rotational_damping", 7.0);
     auto_declare<double>("nullspace_stiffness", 20.0);
     auto_declare<double>("joint1_nullspace_stiffness", 20.0);
@@ -160,6 +167,16 @@ CallbackReturn JointForceSlideController::on_configure(
   force_filter_alpha_ = get_node()->get_parameter("force_filter_alpha").as_double();
   max_descend_distance_ = get_node()->get_parameter("max_descend_distance").as_double();
 
+  auto wp_flat = get_node()->get_parameter("slide_waypoints").as_double_array();
+  slide_waypoints_.clear();
+  for (size_t i = 0; i + 1 < wp_flat.size(); i += 2) {
+    slide_waypoints_.emplace_back(wp_flat[i], wp_flat[i + 1]);
+  }
+  if (slide_waypoints_.empty()) {
+    slide_waypoints_.emplace_back(0.05, 0.0);
+    slide_waypoints_.emplace_back(0.05, 0.05);
+  }
+
   translational_stiffness_xy_ = get_node()->get_parameter("translational_stiffness_xy").as_double();
   translational_stiffness_z_settle_ = get_node()->get_parameter("translational_stiffness_z_settle").as_double();
   translational_stiffness_z_descend_ = get_node()->get_parameter("translational_stiffness_z_descend").as_double();
@@ -180,12 +197,13 @@ CallbackReturn JointForceSlideController::on_configure(
   max_torque_ = get_node()->get_parameter("max_torque").as_double();
 
   RCLCPP_INFO(get_node()->get_logger(),
-              "Configured: start_phase='%s', K_z_settle=%.0f, K_z_descend=%.0f, K_z_slide=%.0f, descend_speed=%.4f",
+              "Configured: start_phase='%s', K_z_settle=%.0f, K_z_descend=%.0f, K_z_slide=%.0f, descend_speed=%.4f, waypoints=%zu",
               start_phase_str_.c_str(),
               translational_stiffness_z_settle_,
               translational_stiffness_z_descend_,
               translational_stiffness_z_slide_,
-              descend_speed_);
+              descend_speed_,
+              slide_waypoints_.size());
 
   phase_publisher_ = get_node()->create_publisher<std_msgs::msg::String>(
       "~/phase", rclcpp::SystemDefaultsQoS());
@@ -396,11 +414,14 @@ CallbackReturn JointForceSlideController::on_activate(
 
     auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
     Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
-    slide_start_x_ = transform.translation().x();
+    slide_start_xy_ = Eigen::Vector2d(transform.translation().x(), transform.translation().y());
     slide_base_z_ = position_d_.z();
+    current_waypoint_ = 0;
     position_filter_ = 0.1;
 
-    RCLCPP_INFO(get_node()->get_logger(), "Starting at SLIDE (start_x=%.4f, base_z=%.4f)", slide_start_x_, slide_base_z_);
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Starting at SLIDE (start_xy=[%.4f, %.4f], base_z=%.4f, waypoints=%zu)",
+                slide_start_xy_.x(), slide_start_xy_.y(), slide_base_z_, slide_waypoints_.size());
   }
 
   filtered_force_z_ = 0.0;
@@ -1011,24 +1032,24 @@ controller_interface::return_type JointForceSlideController::updateDescend() {
 
   if (force_change >= target_force_ || descended >= max_descend_distance_) {
     phase_ = Phase::SLIDE;
-    slide_start_x_ = position.x();
+    slide_start_xy_ = Eigen::Vector2d(position.x(), position.y());
     force_error_integral_ = 0.0;
     z_offset_ = 0.0;
+    current_waypoint_ = 0;
 
     setStiffnessForPhase(Phase::SLIDE);
     cartesian_stiffness_ = cartesian_stiffness_target_;
     cartesian_damping_ = cartesian_damping_target_;
 
-    double target_offset = target_force_ / translational_stiffness_z_slide_;
-    slide_base_z_ = position.z() - target_offset;
+    slide_base_z_ = position.z();
     position_d_target_.z() = slide_base_z_;
     position_d_.z() = slide_base_z_;
 
     position_filter_ = 0.1;
 
     RCLCPP_INFO(get_node()->get_logger(),
-                "DESCEND complete -> SLIDE (force_change=%.3f, descended=%.4f, pos=[%.4f,%.4f,%.4f], slide_base_z=%.4f, target_offset=%.4f)",
-                force_change, descended, position.x(), position.y(), position.z(), slide_base_z_, target_offset);
+                "DESCEND complete -> SLIDE (force_change=%.3f, descended=%.4f, pos=[%.4f, %.4f, %.4f], slide_base_z=%.4f, waypoints=%zu)",
+                force_change, descended, position.x(), position.y(), position.z(), slide_base_z_, slide_waypoints_.size());
   }
 
   return controller_interface::return_type::OK;
@@ -1037,45 +1058,16 @@ controller_interface::return_type JointForceSlideController::updateDescend() {
 /**
  * @brief 更新滑动阶段
  * 
- * 在SLIDE阶段，末端执行器在保持目标接触力的同时沿X轴滑动。
- * 使用PI控制器调节Z轴位置来维持目标接触力：
- * - 接触力小于目标力时，向下移动增加接触力
- * - 接触力大于目标力时，向上移动减小接触力
- * 
- * 使用低刚度阻抗控制以实现柔顺滑动。
- * 当滑动距离达到目标距离时，切换回JOINT_MOVE阶段。
+ * 在SLIDE阶段，末端执行器沿航点路径在XY平面移动，Z轴锁定保持高度。
+ * 航点以相对于起始位置的偏移量定义，默认路径为：
+ * (x,y) → (x+0.05, y) → (x+0.05, y+0.05)
+ * 使用高刚度阻抗控制锁定Z轴，确保水平运动无垂直振荡。
+ * 当所有航点到达后，切换回JOINT_MOVE阶段。
  * 
  * @return 执行成功返回OK
  */
 controller_interface::return_type JointForceSlideController::updateSlide() {
-  position_d_target_.x() += slide_speed_ / 1000.0;
-
-  double contact_force = filtered_force_z_ - baseline_force_z_;
-  double force_error = target_force_ - contact_force;
-
-  force_error_integral_ += force_error * 0.001;
-  force_error_integral_ = std::max(-0.1, std::min(0.1, force_error_integral_));
-
-  z_offset_ = force_kp_ * force_error + force_ki_ * force_error_integral_;
-  z_offset_ = std::max(-0.03, std::min(0.03, z_offset_));
-
-  position_d_target_.z() = slide_base_z_ - z_offset_;
-
-  Eigen::Matrix<double, 7, 1> tau_d;
-  computeImpedanceControl(tau_d);
-
-  for (size_t i = 0; i < 7; ++i) {
-    command_interfaces_[i].set_value(tau_d(i));
-    last_cmd_tau_[i] = tau_d(i);
-  }
-
-  auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
-  Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
-  Eigen::Vector3d position(transform.translation());
-
-  double slided = std::abs(position.x() - slide_start_x_);
-  double target_slided = std::abs(position_d_target_.x() - slide_start_x_);
-  if (slided >= slide_distance_ || target_slided >= slide_distance_ * 1.5) {
+  if (current_waypoint_ >= static_cast<int>(slide_waypoints_.size())) {
     phase_ = Phase::JOINT_MOVE;
     position_filter_ = filter_params_;
     for (size_t i = 0; i < static_cast<size_t>(num_joints_); ++i) {
@@ -1086,8 +1078,50 @@ controller_interface::return_type JointForceSlideController::updateSlide() {
     z_offset_ = 0.0;
 
     RCLCPP_INFO(get_node()->get_logger(),
-                "SLIDE complete -> JOINT_MOVE (slided=%.4f, target_slided=%.4f)",
-                slided, target_slided);
+                "SLIDE complete -> JOINT_MOVE (all %zu waypoints reached)",
+                slide_waypoints_.size());
+    return controller_interface::return_type::OK;
+  }
+
+  Eigen::Vector2d target_xy = slide_start_xy_ + slide_waypoints_[current_waypoint_];
+  Eigen::Vector2d current_xy(position_d_target_.x(), position_d_target_.y());
+  Eigen::Vector2d direction = target_xy - current_xy;
+  double distance = direction.norm();
+
+  if (distance < 0.001) {
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Waypoint %d/%zu reached: target=(%.4f, %.4f)",
+                current_waypoint_, slide_waypoints_.size(),
+                target_xy.x(), target_xy.y());
+    current_waypoint_++;
+    return controller_interface::return_type::OK;
+  }
+
+  direction.normalize();
+  double step = std::min(slide_speed_ / 1000.0, distance);
+
+  position_d_target_.x() += direction.x() * step;
+  position_d_target_.y() += direction.y() * step;
+  position_d_target_.z() = slide_base_z_;
+
+  Eigen::Matrix<double, 7, 1> tau_d;
+  computeImpedanceControl(tau_d);
+
+  for (size_t i = 0; i < 7; ++i) {
+    command_interfaces_[i].set_value(tau_d(i));
+    last_cmd_tau_[i] = tau_d(i);
+  }
+
+  if (update_count_ % 1000 == 0) {
+    auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+    Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+    Eigen::Vector3d pos = transform.translation();
+
+    RCLCPP_INFO(get_node()->get_logger(),
+                "[SLIDE] wp=%d/%zu pos=[%.4f,%.4f,%.4f] target_xy=[%.4f,%.4f] dist=%.4f",
+                current_waypoint_, slide_waypoints_.size(),
+                pos.x(), pos.y(), pos.z(),
+                target_xy.x(), target_xy.y(), distance);
   }
 
   return controller_interface::return_type::OK;

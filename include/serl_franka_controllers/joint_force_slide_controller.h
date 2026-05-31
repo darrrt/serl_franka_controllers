@@ -91,12 +91,15 @@ class JointForceSlideController : public controller_interface::ControllerInterfa
   double force_kp_ = 0.005;
   double force_ki_ = 0.01;
   double force_filter_alpha_ = 0.1;
-  double max_descend_distance_ = 0.15;
+  double max_descend_distance_ = 0.25;
   double force_error_integral_ = 0.0;
   double z_offset_ = 0.0;
-  double slide_start_x_ = 0.0;
   double descend_start_z_ = 0.0;
   double slide_base_z_ = 0.0;
+
+  std::vector<Eigen::Vector2d> slide_waypoints_;
+  int current_waypoint_ = 0;
+  Eigen::Vector2d slide_start_xy_;
 
   double filter_params_ = 0.005;
   double position_filter_ = 0.005;
@@ -122,12 +125,12 @@ class JointForceSlideController : public controller_interface::ControllerInterfa
   double translational_stiffness_xy_ = 2000.0;
   double translational_stiffness_z_settle_ = 2000.0;
   double translational_stiffness_z_descend_ = 1500.0;
-  double translational_stiffness_z_slide_ = 200.0;
+  double translational_stiffness_z_slide_ = 1500.0;
   double rotational_stiffness_ = 150.0;
   double translational_damping_xy_ = 89.0;
   double translational_damping_z_settle_ = 89.0;
   double translational_damping_z_descend_ = 60.0;
-  double translational_damping_z_slide_ = 30.0;
+  double translational_damping_z_slide_ = 60.0;
   double rotational_damping_ = 7.0;
 
   double max_joint_velocity_ = 2.0;

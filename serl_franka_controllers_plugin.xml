@@ -24,4 +24,9 @@
       A controller that descends vertically until contact, then slides horizontally while maintaining contact force. Implements a state machine: DESCEND -> SLIDE -> DONE.
     </description>
   </class>
+  <class name="serl_franka_controllers/DataCollectionController" type="serl_franka_controllers::DataCollectionController" base_class_type="controller_interface::ControllerInterface">
+    <description>
+      A controller for automated tactile data collection with Franka robot. Implements: GRASP (close gripper) -> TEACH (gravity compensation, user drags arm) -> CALIBRATE (auto payload mass/CoM identification) -> data collection loop (APPROACH -> DESCEND -> SLIDE with force control -> LIFT -> repeat).
+    </description>
+  </class>
 </library>

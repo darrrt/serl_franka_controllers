@@ -19,6 +19,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(rclcpp_lifecycle REQUIRED)
 find_package(realtime_tools REQUIRED)
 find_package(std_srvs REQUIRED)
@@ -35,6 +36,7 @@ add_library(${PROJECT_NAME} SHARED
   src/joint_position_oscillation_controller.cpp
   src/cartesian_impedance_controller.cpp
   src/joint_force_slide_controller.cpp
+  src/data_collection_controller.cpp
 )
 
 target_include_directories(${PROJECT_NAME} PUBLIC
@@ -45,11 +47,13 @@ target_include_directories(${PROJECT_NAME} PUBLIC
 ament_target_dependencies(${PROJECT_NAME}
   rosidl_typesupport_fastrtps_cpp
   controller_interface
+  franka_msgs
   franka_semantic_components
   geometry_msgs
   hardware_interface
   pluginlib
   rclcpp
+  rclcpp_action
   rclcpp_lifecycle
   realtime_tools
   std_srvs
