@@ -99,6 +99,18 @@ def generate_robot_nodes(context):
             arguments=['data_collection_controller'],
             output='screen',
         ),
+        # Node( 在独立的终端中启动
+        #     package='serl_franka_controllers',
+        #     executable='keyboard_trigger_node.py',
+        #     namespace=namespace,
+        #     parameters=[{
+        #         'teach_trigger_topic': namespace + '/data_collection_controller/teach_trigger'
+        #         if namespace else '/data_collection_controller/teach_trigger',
+        #         'reset_topic': namespace + '/data_collection_controller/reset'
+        #         if namespace else '/data_collection_controller/reset',
+        #     }],
+        #     output='screen',
+        # ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource([PathJoinSubstitution(
                 [FindPackageShare('franka_gripper'), 'launch', 'gripper.launch.py'])]),

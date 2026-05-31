@@ -912,7 +912,9 @@ controller_interface::return_type DataCollectionController::updateTeach() {
     last_cmd_tau_[i] = tau_d(i);
   }
 
-  if (teach_triggered_) {
+  if (teach_triggered_.load()) {
+    teach_triggered_.store(false);
+
     auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
     Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
     teach_start_position_ = transform.translation();

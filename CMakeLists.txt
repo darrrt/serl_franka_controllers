@@ -104,6 +104,12 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
+install(
+  PROGRAMS
+  scripts/keyboard_trigger_node.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 
 
 ament_export_include_directories(include)

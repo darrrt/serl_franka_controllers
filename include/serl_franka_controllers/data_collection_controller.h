@@ -210,7 +210,7 @@ class DataCollectionController : public controller_interface::ControllerInterfac
 
   double teach_damping_translational_ = 10.0;
   double teach_damping_rotational_ = 1.0;
-  bool teach_triggered_ = false;
+  std::atomic<bool> teach_triggered_{false};
   Eigen::Vector3d teach_start_position_;
   Eigen::Quaterniond teach_start_orientation_;
   double slide_base_z_ = 0.0;
