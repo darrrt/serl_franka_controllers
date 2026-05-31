@@ -84,6 +84,12 @@ CallbackReturn DataCollectionController::on_init() {
     auto_declare<double>("force_filter_alpha", 0.1);
     auto_declare<double>("max_descend_distance", 0.25);
     auto_declare<double>("approach_height", 0.05);
+    auto_declare<double>("area_rise_height", 0.05);
+
+    auto_declare<bool>("skip_grasp", false);
+    auto_declare<bool>("skip_calibrate", false);
+    auto_declare<double>("payload_mass", 0.0);
+    auto_declare<std::vector<double>>("payload_com", {0.0, 0.0, 0.0});
 
     auto_declare<double>("translational_stiffness_xy", 2000.0);
     auto_declare<double>("translational_stiffness_z", 1500.0);
@@ -161,6 +167,23 @@ CallbackReturn DataCollectionController::on_configure(
   force_filter_alpha_ = get_node()->get_parameter("force_filter_alpha").as_double();
   max_descend_distance_ = get_node()->get_parameter("max_descend_distance").as_double();
   approach_height_ = get_node()->get_parameter("approach_height").as_double();
+  area_rise_height_ = get_node()->get_parameter("area_rise_height").as_double();
+
+  skip_grasp_ = get_node()->get_parameter("skip_grasp").as_bool();
+  skip_calibrate_ = get_node()->get_parameter("skip_calibrate").as_bool();
+
+  if (skip_calibrate_) {
+    payload_mass_ = get_node()->get_parameter("payload_mass").as_double();
+    auto com_vec = get_node()->get_parameter("payload_com").as_double_array();
+    if (com_vec.size() >= 3) {
+      payload_com_ = Eigen::Vector3d(com_vec[0], com_vec[1], com_vec[2]);
+    }
+    calib_loaded_from_params_ = true;
+    calib_publish_delay_ = 1000;
+    RCLCPP_INFO(get_node()->get_logger(),
+                "Loaded calibration from params: mass=%.4f kg, CoM=[%.4f, %.4f, %.4f]",
+                payload_mass_, payload_com_.x(), payload_com_.y(), payload_com_.z());
+  }
 
   translational_stiffness_xy_ = get_node()->get_parameter("translational_stiffness_xy").as_double();
   translational_stiffness_z_ = get_node()->get_parameter("translational_stiffness_z").as_double();
@@ -204,6 +227,12 @@ CallbackReturn DataCollectionController::on_configure(
       "~/payload_mass", rclcpp::SystemDefaultsQoS());
   payload_com_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
       "~/payload_com", rclcpp::SystemDefaultsQoS());
+
+  calib_result_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+      "~/calib_result", rclcpp::SystemDefaultsQoS());
+
+  rt_state_publisher_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
+      "~/rt_state", rclcpp::SystemDefaultsQoS());
 
   grasp_client_ = rclcpp_action::create_client<franka_msgs::action::Grasp>(
       get_node(), gripper_action_prefix_ + "/grasp");
@@ -250,6 +279,11 @@ CallbackReturn DataCollectionController::on_activate(
   robot_state_ptr_ = getRobotStatePtr();
 
   phase_ = Phase::GRASP;
+  if (skip_grasp_ && skip_calibrate_) {
+    phase_ = Phase::TEACH;
+  } else if (skip_grasp_) {
+    phase_ = Phase::TEACH;
+  }
   grasp_attempt_count_ = 0;
   grasp_state_ = GraspState::IDLE;
   grasp_request_ = false;
@@ -277,6 +311,10 @@ CallbackReturn DataCollectionController::on_activate(
   collection_dy_step_ = default_dy_step_;
   collection_f0_ = default_f0_;
   collection_params_received_ = false;
+
+  if (skip_calibrate_ && calib_loaded_from_params_) {
+    calib_publish_delay_ = 1000;
+  }
 
   initImpedanceState();
 
@@ -337,6 +375,9 @@ std::string DataCollectionController::phaseToString(Phase p) {
     case Phase::TEACH: return "TEACH";
     case Phase::CALIBRATE: return "CALIBRATE";
     case Phase::APPROACH: return "APPROACH";
+    case Phase::AREA_RISE: return "AREA_RISE";
+    case Phase::AREA_MOVE: return "AREA_MOVE";
+    case Phase::AREA_DESCEND: return "AREA_DESCEND";
     case Phase::DESCEND: return "DESCEND";
     case Phase::SLIDE: return "SLIDE";
     case Phase::LIFT: return "LIFT";
@@ -706,6 +747,10 @@ void DataCollectionController::solvePayloadCalibration() {
   std_msgs::msg::Float64MultiArray com_msg;
   com_msg.data = {payload_com_.x(), payload_com_.y(), payload_com_.z()};
   payload_com_publisher_->publish(com_msg);
+
+  std_msgs::msg::Float64MultiArray calib_result_msg;
+  calib_result_msg.data = {payload_mass_, payload_com_.x(), payload_com_.y(), payload_com_.z()};
+  calib_result_publisher_->publish(calib_result_msg);
 }
 
 void DataCollectionController::teachTriggerCallback(
@@ -724,14 +769,30 @@ void DataCollectionController::collectionParamsCallback(
     collection_dx_step_ = msg->data[2];
     collection_dy_step_ = msg->data[3];
     collection_f0_ = msg->data[4];
+
+    collection_switch_area_ = false;
+    collection_target_x_ = 0.0;
+    collection_target_y_ = 0.0;
+
+    if (msg->data.size() >= 6) {
+      collection_switch_area_ = (msg->data[5] > 0.5);
+    }
+    if (msg->data.size() >= 8) {
+      collection_target_x_ = msg->data[6];
+      collection_target_y_ = msg->data[7];
+    }
+
     collection_params_received_ = true;
     RCLCPP_INFO(get_node()->get_logger(),
-                "Collection params received: dx=%.4f dy=%.4f dx_step=%.4f dy_step=%.4f F0=%.2f",
+                "Collection params: dx=%.4f dy=%.4f dx_step=%.4f dy_step=%.4f F0=%.2f "
+                "switch_area=%s target=[%.4f, %.4f]",
                 collection_dx_, collection_dy_, collection_dx_step_,
-                collection_dy_step_, collection_f0_);
+                collection_dy_step_, collection_f0_,
+                collection_switch_area_ ? "true" : "false",
+                collection_target_x_, collection_target_y_);
   } else {
     RCLCPP_WARN(get_node()->get_logger(),
-                "Collection params need 5 values, got %zu", msg->data.size());
+                "Collection params need >=5 values, got %zu", msg->data.size());
   }
 }
 
@@ -781,6 +842,9 @@ controller_interface::return_type DataCollectionController::update(
     case Phase::TEACH: updateTeach(); break;
     case Phase::CALIBRATE: updateCalibrate(); break;
     case Phase::APPROACH: updateApproach(); break;
+    case Phase::AREA_RISE: updateAreaRise(); break;
+    case Phase::AREA_MOVE: updateAreaMove(); break;
+    case Phase::AREA_DESCEND: updateAreaDescend(); break;
     case Phase::DESCEND: updateDescend(); break;
     case Phase::SLIDE: updateSlide(); break;
     case Phase::LIFT: updateLift(); break;
@@ -795,6 +859,51 @@ controller_interface::return_type DataCollectionController::update(
 
   update_count_++;
 
+  if (rt_state_publisher_->get_subscription_count() > 0) {
+    auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+    Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+    Eigen::Vector3d pos = transform.translation();
+    Eigen::Quaterniond orient(transform.linear());
+
+    sensor_msgs::msg::JointState rt_msg;
+    rt_msg.header.stamp = time;
+    rt_msg.name.resize(7 + 7 + 7 + 6 + 3 + 4 + 1);
+    rt_msg.position.resize(7 + 7 + 7 + 6 + 3 + 4 + 1);
+    for (int i = 0; i < 7; ++i) {
+      rt_msg.name[i] = arm_id_ + "_joint" + std::to_string(i + 1);
+      rt_msg.position[i] = q_[i];
+    }
+    for (int i = 0; i < 7; ++i) {
+      rt_msg.name[7 + i] = arm_id_ + "_joint" + std::to_string(i + 1) + "/velocity";
+      rt_msg.position[7 + i] = dq_[i];
+    }
+    for (int i = 0; i < 7; ++i) {
+      rt_msg.name[14 + i] = arm_id_ + "_joint" + std::to_string(i + 1) + "/effort";
+      rt_msg.position[14 + i] = last_cmd_tau_[i];
+    }
+    if (robot_state_ptr_) {
+      for (int i = 0; i < 6; ++i) {
+        rt_msg.name[21 + i] = std::string("O_F_ext_") + std::to_string(i);
+        rt_msg.position[21 + i] = robot_state_ptr_->O_F_ext_hat_K[i];
+      }
+    } else {
+      for (int i = 0; i < 6; ++i) {
+        rt_msg.name[21 + i] = std::string("O_F_ext_") + std::to_string(i);
+        rt_msg.position[21 + i] = 0.0;
+      }
+    }
+    rt_msg.name[27] = "cart_x"; rt_msg.position[27] = pos.x();
+    rt_msg.name[28] = "cart_y"; rt_msg.position[28] = pos.y();
+    rt_msg.name[29] = "cart_z"; rt_msg.position[29] = pos.z();
+    rt_msg.name[30] = "orient_w"; rt_msg.position[30] = orient.w();
+    rt_msg.name[31] = "orient_x"; rt_msg.position[31] = orient.x();
+    rt_msg.name[32] = "orient_y"; rt_msg.position[32] = orient.y();
+    rt_msg.name[33] = "orient_z"; rt_msg.position[33] = orient.z();
+    rt_msg.name[34] = "phase"; rt_msg.position[34] = static_cast<double>(static_cast<int>(phase_));
+
+    rt_state_publisher_->publish(rt_msg);
+  }
+
   if (update_count_ % 100 == 0) {
     std_msgs::msg::String phase_msg;
     phase_msg.data = phaseToString(phase_);
@@ -803,6 +912,18 @@ controller_interface::return_type DataCollectionController::update(
     std_msgs::msg::Float64 force_msg;
     force_msg.data = filtered_force_z_;
     filtered_force_publisher_->publish(force_msg);
+
+    if (calib_loaded_from_params_ && calib_publish_delay_ > 0) {
+      calib_publish_delay_ -= 100;
+      if (calib_publish_delay_ <= 0) {
+        std_msgs::msg::Float64MultiArray calib_result_msg;
+        calib_result_msg.data = {payload_mass_, payload_com_.x(), payload_com_.y(), payload_com_.z()};
+        calib_result_publisher_->publish(calib_result_msg);
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "Published loaded calibration result: mass=%.4f kg", payload_mass_);
+        calib_loaded_from_params_ = false;
+      }
+    }
 
     if (force_publisher_->get_subscription_count() > 0) {
       geometry_msgs::msg::WrenchStamped wrench_msg;
@@ -957,23 +1078,31 @@ controller_interface::return_type DataCollectionController::updateTeach() {
                 calib_rise_position_.x(), calib_rise_position_.y(),
                 calib_rise_position_.z());
 
-    phase_ = Phase::CALIBRATE;
-    calib_sub_phase_ = CalibSubPhase::RISE;
-    calib_current_config_ = 0;
-    calib_record_count_ = 0;
-    calib_settle_count_ = 0;
-    calib_home_cycle_count_ = 0;
+    if (skip_calibrate_) {
+      phase_ = Phase::WAIT_PARAMS;
+      collection_params_received_ = false;
+      setStiffnessForPhase(Phase::APPROACH);
+      initImpedanceState();
+      RCLCPP_INFO(get_node()->get_logger(), "TEACH -> WAIT_PARAMS (calibration skipped)");
+    } else {
+      phase_ = Phase::CALIBRATE;
+      calib_sub_phase_ = CalibSubPhase::RISE;
+      calib_current_config_ = 0;
+      calib_record_count_ = 0;
+      calib_settle_count_ = 0;
+      calib_home_cycle_count_ = 0;
 
-    int n = static_cast<int>(calib_orientations_.size());
-    calib_Y_stack_.resize(6 * n, 4);
-    calib_W_stack_.resize(6 * n);
-    calib_Y_stack_.setZero();
-    calib_W_stack_.setZero();
+      int n = static_cast<int>(calib_orientations_.size());
+      calib_Y_stack_.resize(6 * n, 4);
+      calib_W_stack_.resize(6 * n);
+      calib_Y_stack_.setZero();
+      calib_W_stack_.setZero();
 
-    setStiffnessForPhase(Phase::CALIBRATE);
-    initImpedanceState();
+      setStiffnessForPhase(Phase::CALIBRATE);
+      initImpedanceState();
 
-    RCLCPP_INFO(get_node()->get_logger(), "TEACH -> CALIBRATE");
+      RCLCPP_INFO(get_node()->get_logger(), "TEACH -> CALIBRATE");
+    }
   }
 
   return controller_interface::return_type::OK;
@@ -1400,14 +1529,38 @@ controller_interface::return_type DataCollectionController::updateWaitParams() {
 
   if (collection_params_received_) {
     collection_params_received_ = false;
-    phase_ = Phase::APPROACH;
-    setStiffnessForPhase(Phase::APPROACH);
-    initImpedanceState();
 
-    RCLCPP_INFO(get_node()->get_logger(),
-                "WAIT_PARAMS -> APPROACH (dx=%.4f dy=%.4f dx_step=%.4f dy_step=%.4f F0=%.2f)",
-                collection_dx_, collection_dy_, collection_dx_step_,
-                collection_dy_step_, collection_f0_);
+    if (collection_switch_area_) {
+      auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+      Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+      Eigen::Vector3d current_pos = transform.translation();
+
+      area_rise_target_ = current_pos;
+      area_rise_target_.z() = slide_base_z_ + area_rise_height_;
+
+      area_move_target_ = Eigen::Vector3d(
+          collection_target_x_,
+          collection_target_y_,
+          slide_base_z_ + area_rise_height_);
+
+      phase_ = Phase::AREA_RISE;
+      setStiffnessForPhase(Phase::APPROACH);
+      initImpedanceState();
+
+      RCLCPP_INFO(get_node()->get_logger(),
+                  "WAIT_PARAMS -> AREA_RISE (switch area to [%.4f, %.4f], rise to z=%.4f)",
+                  collection_target_x_, collection_target_y_,
+                  area_rise_target_.z());
+    } else {
+      phase_ = Phase::APPROACH;
+      setStiffnessForPhase(Phase::APPROACH);
+      initImpedanceState();
+
+      RCLCPP_INFO(get_node()->get_logger(),
+                  "WAIT_PARAMS -> APPROACH (dx=%.4f dy=%.4f dx_step=%.4f dy_step=%.4f F0=%.2f)",
+                  collection_dx_, collection_dy_, collection_dx_step_,
+                  collection_dy_step_, collection_f0_);
+    }
   }
 
   return controller_interface::return_type::OK;
@@ -1420,6 +1573,100 @@ controller_interface::return_type DataCollectionController::updateDone() {
     command_interfaces_[i].set_value(tau_d(i));
     last_cmd_tau_[i] = tau_d(i);
   }
+  return controller_interface::return_type::OK;
+}
+
+controller_interface::return_type DataCollectionController::updateAreaRise() {
+  position_d_target_ = area_rise_target_;
+  orientation_d_target_ = teach_start_orientation_;
+
+  Eigen::Matrix<double, 7, 1> tau_d;
+  computeImpedanceControl(tau_d);
+  for (size_t i = 0; i < 7; ++i) {
+    command_interfaces_[i].set_value(tau_d(i));
+    last_cmd_tau_[i] = tau_d(i);
+  }
+
+  auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+  Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+  Eigen::Vector3d current_pos = transform.translation();
+
+  if (std::abs(current_pos.z() - area_rise_target_.z()) < 0.005) {
+    phase_ = Phase::AREA_MOVE;
+    initImpedanceState();
+
+    RCLCPP_INFO(get_node()->get_logger(),
+                "AREA_RISE -> AREA_MOVE (risen to z=%.4f)", current_pos.z());
+  }
+
+  return controller_interface::return_type::OK;
+}
+
+controller_interface::return_type DataCollectionController::updateAreaMove() {
+  position_d_target_ = area_move_target_;
+  orientation_d_target_ = teach_start_orientation_;
+
+  Eigen::Matrix<double, 7, 1> tau_d;
+  computeImpedanceControl(tau_d);
+  for (size_t i = 0; i < 7; ++i) {
+    command_interfaces_[i].set_value(tau_d(i));
+    last_cmd_tau_[i] = tau_d(i);
+  }
+
+  auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+  Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+  Eigen::Vector3d current_pos = transform.translation();
+
+  double xy_dist = Eigen::Vector2d(
+      current_pos.x() - area_move_target_.x(),
+      current_pos.y() - area_move_target_.y()).norm();
+
+  if (xy_dist < 0.005) {
+    phase_ = Phase::AREA_DESCEND;
+    initImpedanceState();
+
+    RCLCPP_INFO(get_node()->get_logger(),
+                "AREA_MOVE -> AREA_DESCEND (reached [%.4f, %.4f])",
+                current_pos.x(), current_pos.y());
+  }
+
+  return controller_interface::return_type::OK;
+}
+
+controller_interface::return_type DataCollectionController::updateAreaDescend() {
+  Eigen::Vector3d target_pos(
+      collection_target_x_ + collection_dx_,
+      collection_target_y_ + collection_dy_,
+      slide_base_z_);
+
+  position_d_target_ = target_pos;
+  orientation_d_target_ = teach_start_orientation_;
+
+  Eigen::Matrix<double, 7, 1> tau_d;
+  computeImpedanceControl(tau_d);
+  for (size_t i = 0; i < 7; ++i) {
+    command_interfaces_[i].set_value(tau_d(i));
+    last_cmd_tau_[i] = tau_d(i);
+  }
+
+  auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+  Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+  Eigen::Vector3d current_pos = transform.translation();
+
+  if ((current_pos - target_pos).norm() < 0.005) {
+    phase_ = Phase::DESCEND;
+    baseline_force_z_ = filtered_force_z_;
+    force_error_integral_ = 0.0;
+    z_offset_ = 0.0;
+    descend_start_z_ = current_pos.z();
+
+    setStiffnessForPhase(Phase::DESCEND);
+
+    RCLCPP_INFO(get_node()->get_logger(),
+                "AREA_DESCEND -> DESCEND (reached [%.4f, %.4f, %.4f], baseline_force=%.3f)",
+                current_pos.x(), current_pos.y(), current_pos.z(), baseline_force_z_);
+  }
+
   return controller_interface::return_type::OK;
 }
 

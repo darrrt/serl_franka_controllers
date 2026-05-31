@@ -52,6 +52,9 @@ class DataCollectionController : public controller_interface::ControllerInterfac
     TEACH = 1,
     CALIBRATE = 2,
     APPROACH = 3,
+    AREA_RISE = 9,
+    AREA_MOVE = 10,
+    AREA_DESCEND = 11,
     DESCEND = 4,
     SLIDE = 5,
     LIFT = 6,
@@ -108,6 +111,9 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   controller_interface::return_type updateTeach();
   controller_interface::return_type updateCalibrate();
   controller_interface::return_type updateApproach();
+  controller_interface::return_type updateAreaRise();
+  controller_interface::return_type updateAreaMove();
+  controller_interface::return_type updateAreaDescend();
   controller_interface::return_type updateDescend();
   controller_interface::return_type updateSlide();
   controller_interface::return_type updateLift();
@@ -235,6 +241,10 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   int calib_record_count_ = 0;
   double payload_mass_ = 0.0;
   Eigen::Vector3d payload_com_ = Eigen::Vector3d::Zero();
+  bool skip_grasp_ = false;
+  bool skip_calibrate_ = false;
+  bool calib_loaded_from_params_ = false;
+  int calib_publish_delay_ = 0;
 
   double default_dx_ = 0.01;
   double default_dy_ = 0.0;
@@ -248,6 +258,12 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   double collection_dy_step_ = 0.0;
   double collection_f0_ = 1.0;
   bool collection_params_received_ = false;
+  bool collection_switch_area_ = false;
+  double collection_target_x_ = 0.0;
+  double collection_target_y_ = 0.0;
+  double area_rise_height_ = 0.05;
+  Eigen::Vector3d area_rise_target_;
+  Eigen::Vector3d area_move_target_;
 
   double target_force_ = 1.0;
   double descend_speed_ = 0.005;
@@ -275,6 +291,8 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   std::shared_ptr<rclcpp::Publisher<geometry_msgs::msg::WrenchStamped>> force_publisher_;
   std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64>> payload_mass_publisher_;
   std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> payload_com_publisher_;
+  std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> calib_result_publisher_;
+  std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::JointState>> rt_state_publisher_;
 
   rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr grasp_client_;
   rclcpp_action::Client<franka_msgs::action::Move>::SharedPtr move_client_;

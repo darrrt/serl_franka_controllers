@@ -118,7 +118,7 @@
       grasp_epsilon_outer: 0.005
       max_grasp_attempts: 3
       gripper_action_prefix: "franka_gripper"
-      d_min: 0.002
+      d_min: 0.001
       d_max: 0.008
       gripper_open_width: 0.08
       teach_damping_translational: 10.0
@@ -142,6 +142,11 @@
       force_filter_alpha: 0.1
       max_descend_distance: 0.25
       approach_height: 0.05
+      area_rise_height: 0.05
+      skip_grasp: false
+      skip_calibrate: false
+      payload_mass: 0.0
+      payload_com: [0.0, 0.0, 0.0]
       translational_stiffness_xy: 2000.0
       translational_stiffness_z: 1500.0
       rotational_stiffness: 150.0

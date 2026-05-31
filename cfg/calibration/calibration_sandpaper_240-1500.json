@@ -1,0 +1,49 @@
+{
+  "calibration_board": {
+    "type": "custom_mesh_grid",
+    "description": "Mesh grid with different mesh numbers",
+    "unit": "mm",
+    "layout": {
+      "rows": 4,
+      "columns": 4,
+      "grid_size_x": 30.0,
+      "grid_size_y": 30.0,
+      "gap_size": 2.0
+    },
+    "coordinate_system": {
+      "origin": "80",
+      "x_axis_direction": "towards 280",
+      "y_axis_direction": "towards 120"
+    },
+    "matrix_data": [
+      ["240", "400", "1200", "3000"],
+      ["220", "360", "1000", "2500"],
+      ["120", "320", "800", "2000"],
+      ["80",  "280", "600", "1500"]
+    ],
+    "points_3d": {
+      "comment": "3D coordinates (X, Y, Z) of the bottom-left corner of each cell, assuming Z=0",
+      "data": [
+        {"name": "80cc",   "row": 0, "col": 0, "pos_mm": [0.0, 0.0, 0.0]},
+        {"name": "280cc",  "row": 0, "col": 1, "pos_mm": [32.0, 0.0, 0.0]},
+        {"name": "600cc",  "row": 0, "col": 2, "pos_mm": [64.0, 0.0, 0.0]},
+        {"name": "1500cc", "row": 0, "col": 3, "pos_mm": [96.0, 0.0, 0.0]},
+        
+        {"name": "120cc",  "row": 1, "col": 0, "pos_mm": [0.0, 32.0, 0.0]},
+        {"name": "320cc",  "row": 1, "col": 1, "pos_mm": [32.0, 32.0, 0.0]},
+        {"name": "800cc",  "row": 1, "col": 2, "pos_mm": [64.0, 32.0, 0.0]},
+        {"name": "2000cc", "row": 1, "col": 3, "pos_mm": [96.0, 32.0, 0.0]},
+        
+        {"name": "220cc",  "row": 2, "col": 0, "pos_mm": [0.0, 64.0, 0.0]},
+        {"name": "360cc",  "row": 2, "col": 1, "pos_mm": [32.0, 64.0, 0.0]},
+        {"name": "1000cc", "row": 2, "col": 2, "pos_mm": [64.0, 64.0, 0.0]},
+        {"name": "2500cc", "row": 2, "col": 3, "pos_mm": [96.0, 64.0, 0.0]},
+        
+        {"name": "240cc",  "row": 3, "col": 0, "pos_mm": [0.0, 96.0, 0.0]},
+        {"name": "400cc",  "row": 3, "col": 1, "pos_mm": [32.0, 96.0, 0.0]},
+        {"name": "1200cc", "row": 3, "col": 2, "pos_mm": [64.0, 96.0, 0.0]},
+        {"name": "3000cc", "row": 3, "col": 3, "pos_mm": [96.0, 96.0, 0.0]}
+      ]
+    }
+  }
+}

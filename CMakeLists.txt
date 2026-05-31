@@ -100,6 +100,11 @@ install(
 )
 
 install(
+  DIRECTORY cfg
+  DESTINATION share/${PROJECT_NAME}
+)
+
+install(
   DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}
 )
@@ -107,6 +112,8 @@ install(
 install(
   PROGRAMS
   scripts/keyboard_trigger_node.py
+  scripts/data_recorder_node.py
+  scripts/collection_manager_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
