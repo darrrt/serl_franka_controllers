@@ -77,6 +77,20 @@ class DataCollectionController : public controller_interface::ControllerInterfac
     FAILED = 4
   };
 
+  enum class GraspSubPhase {
+    OPEN = 0,
+    CLOSING = 1,
+    CHECK = 2
+  };
+
+  enum class MoveState {
+    IDLE = 0,
+    SENDING = 1,
+    WAITING = 2,
+    SUCCEEDED = 3,
+    FAILED = 4
+  };
+
   void updateJointStates();
   franka::RobotState* getRobotStatePtr();
   Eigen::Matrix<double, 7, 1> saturateTorqueRate(
@@ -102,6 +116,7 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   void sendGripperGrasp();
   void sendGripperOpen();
   void gripperTimerCallback();
+  void gripperStateCallback(const sensor_msgs::msg::JointState::SharedPtr msg);
   void graspGoalResponseCallback(
       const rclcpp_action::ClientGoalHandle<franka_msgs::action::Grasp>::SharedPtr& goal_handle);
   void graspResultCallback(
@@ -182,6 +197,17 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   bool grasp_succeeded_ = false;
   std::string gripper_action_prefix_;
 
+  GraspSubPhase grasp_sub_phase_ = GraspSubPhase::OPEN;
+  std::atomic<MoveState> move_state_{MoveState::IDLE};
+  std::atomic<bool> move_request_{false};
+  double d_min_ = 0.005;
+  double d_max_ = 0.01;
+  double gripper_open_width_ = 0.08;
+  double grasp_target_width_ = 0.0;
+  double move_target_width_ = 0.08;
+  double gripper_width_ = 0.08;
+  std::atomic<bool> gripper_width_valid_{false};
+
   double teach_damping_translational_ = 10.0;
   double teach_damping_rotational_ = 1.0;
   bool teach_triggered_ = false;
@@ -246,6 +272,7 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr grasp_client_;
   rclcpp_action::Client<franka_msgs::action::Move>::SharedPtr move_client_;
   rclcpp::TimerBase::SharedPtr gripper_timer_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr gripper_state_subscriber_;
 
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr teach_trigger_subscriber_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr collection_params_subscriber_;

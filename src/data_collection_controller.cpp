@@ -53,6 +53,9 @@ CallbackReturn DataCollectionController::on_init() {
     auto_declare<double>("grasp_epsilon_outer", 0.005);
     auto_declare<int>("max_grasp_attempts", 3);
     auto_declare<std::string>("gripper_action_prefix", "franka_gripper");
+    auto_declare<double>("d_min", 0.005);
+    auto_declare<double>("d_max", 0.01);
+    auto_declare<double>("gripper_open_width", 0.08);
 
     auto_declare<double>("teach_damping_translational", 10.0);
     auto_declare<double>("teach_damping_rotational", 1.0);
@@ -109,6 +112,10 @@ CallbackReturn DataCollectionController::on_configure(
   max_grasp_attempts_ = get_node()->get_parameter("max_grasp_attempts").as_int();
   gripper_action_prefix_ = get_node()->get_parameter("gripper_action_prefix").as_string();
 
+  d_min_ = get_node()->get_parameter("d_min").as_double();
+  d_max_ = get_node()->get_parameter("d_max").as_double();
+  gripper_open_width_ = get_node()->get_parameter("gripper_open_width").as_double();
+
   teach_damping_translational_ = get_node()->get_parameter("teach_damping_translational").as_double();
   teach_damping_rotational_ = get_node()->get_parameter("teach_damping_rotational").as_double();
 
@@ -154,8 +161,9 @@ CallbackReturn DataCollectionController::on_configure(
 
   RCLCPP_INFO(get_node()->get_logger(),
               "DataCollectionController configured: grasp_force=%.1fN, calib_rise=%.2fm, "
-              "default_f0=%.1fN, calib_configs=%zu",
-              grasp_force_, calib_rise_height_, default_f0_, calib_orientations_.size());
+              "default_f0=%.1fN, calib_configs=%zu, d_min=%.4f, d_max=%.4f, gripper_open_width=%.4f",
+              grasp_force_, calib_rise_height_, default_f0_, calib_orientations_.size(),
+              d_min_, d_max_, gripper_open_width_);
 
   phase_publisher_ = get_node()->create_publisher<std_msgs::msg::String>(
       "~/phase", rclcpp::SystemDefaultsQoS());
@@ -193,6 +201,10 @@ CallbackReturn DataCollectionController::on_configure(
       "~/reset", rclcpp::SystemDefaultsQoS(),
       [this](const std_msgs::msg::Bool::SharedPtr msg) { resetCallback(msg); });
 
+  gripper_state_subscriber_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
+      gripper_action_prefix_ + "/joint_states", rclcpp::SystemDefaultsQoS(),
+      [this](const sensor_msgs::msg::JointState::SharedPtr msg) { gripperStateCallback(msg); });
+
   return CallbackReturn::SUCCESS;
 }
 
@@ -218,6 +230,13 @@ CallbackReturn DataCollectionController::on_activate(
   grasp_request_ = false;
   open_request_ = false;
   grasp_succeeded_ = false;
+  grasp_sub_phase_ = GraspSubPhase::OPEN;
+  move_state_ = MoveState::IDLE;
+  move_request_ = false;
+  grasp_target_width_ = d_min_;
+  move_target_width_ = gripper_open_width_;
+  gripper_width_ = gripper_open_width_;
+  gripper_width_valid_ = false;
   teach_triggered_ = false;
   filtered_force_z_ = 0.0;
   force_error_integral_ = 0.0;
@@ -488,7 +507,7 @@ void DataCollectionController::gripperTimerCallback() {
   if (grasp_request_.exchange(false)) {
     sendGripperGrasp();
   }
-  if (open_request_.exchange(false)) {
+  if (move_request_.exchange(false)) {
     sendGripperOpen();
   }
 }
@@ -502,7 +521,7 @@ void DataCollectionController::sendGripperGrasp() {
   }
 
   auto goal_msg = franka_msgs::action::Grasp::Goal();
-  goal_msg.width = grasp_width_;
+  goal_msg.width = grasp_target_width_;
   goal_msg.speed = grasp_speed_;
   goal_msg.force = grasp_force_;
   goal_msg.epsilon.inner = grasp_epsilon_inner_;
@@ -521,7 +540,7 @@ void DataCollectionController::sendGripperGrasp() {
   grasp_client_->async_send_goal(goal_msg, send_goal_options);
   RCLCPP_INFO(get_node()->get_logger(),
               "Sending grasp command: width=%.4f, force=%.1f, speed=%.3f",
-              grasp_width_, grasp_force_, grasp_speed_);
+              grasp_target_width_, grasp_force_, grasp_speed_);
 }
 
 void DataCollectionController::sendGripperOpen() {
@@ -532,7 +551,7 @@ void DataCollectionController::sendGripperOpen() {
   }
 
   auto goal_msg = franka_msgs::action::Move::Goal();
-  goal_msg.width = 0.08;
+  goal_msg.width = move_target_width_;
   goal_msg.speed = grasp_speed_;
 
   auto send_goal_options = rclcpp_action::Client<franka_msgs::action::Move>::SendGoalOptions();
@@ -544,7 +563,7 @@ void DataCollectionController::sendGripperOpen() {
                  result) { this->moveResultCallback(result); };
 
   move_client_->async_send_goal(goal_msg, send_goal_options);
-  RCLCPP_INFO(get_node()->get_logger(), "Sending gripper open command: width=0.08");
+  RCLCPP_INFO(get_node()->get_logger(), "Sending gripper open command: width=%.4f", move_target_width_);
 }
 
 void DataCollectionController::graspGoalResponseCallback(
@@ -576,7 +595,9 @@ void DataCollectionController::moveGoalResponseCallback(
     const rclcpp_action::ClientGoalHandle<franka_msgs::action::Move>::SharedPtr& goal_handle) {
   if (!goal_handle) {
     RCLCPP_ERROR(get_node()->get_logger(), "Move goal rejected");
+    move_state_ = MoveState::FAILED;
   } else {
+    move_state_ = MoveState::WAITING;
     RCLCPP_INFO(get_node()->get_logger(), "Move goal accepted");
   }
 }
@@ -585,9 +606,19 @@ void DataCollectionController::moveResultCallback(
     const rclcpp_action::ClientGoalHandle<franka_msgs::action::Move>::WrappedResult& result) {
   if (result.code == rclcpp_action::ResultCode::SUCCEEDED && result.result->success) {
     RCLCPP_INFO(get_node()->get_logger(), "Gripper move succeeded");
+    move_state_ = MoveState::SUCCEEDED;
   } else {
     RCLCPP_WARN(get_node()->get_logger(), "Gripper move failed: %s",
                 result.result->error.c_str());
+    move_state_ = MoveState::FAILED;
+  }
+}
+
+void DataCollectionController::gripperStateCallback(
+    const sensor_msgs::msg::JointState::SharedPtr msg) {
+  if (msg->position.size() >= 2) {
+    gripper_width_ = std::abs(msg->position[0]) + std::abs(msg->position[1]);
+    gripper_width_valid_ = true;
   }
 }
 
@@ -685,6 +716,12 @@ void DataCollectionController::resetCallback(
   grasp_attempt_count_ = 0;
   grasp_state_ = GraspState::IDLE;
   grasp_succeeded_ = false;
+  grasp_sub_phase_ = GraspSubPhase::OPEN;
+  move_state_ = MoveState::IDLE;
+  grasp_target_width_ = d_min_;
+  move_target_width_ = gripper_open_width_;
+  gripper_width_ = gripper_open_width_;
+  gripper_width_valid_ = false;
   teach_triggered_ = false;
   filtered_force_z_ = 0.0;
   force_error_integral_ = 0.0;
@@ -780,46 +817,87 @@ controller_interface::return_type DataCollectionController::updateGrasp() {
     last_cmd_tau_[i] = tau_d(i);
   }
 
-  switch (grasp_state_) {
-    case GraspState::IDLE:
-      if (grasp_attempt_count_ < max_grasp_attempts_) {
+  switch (grasp_sub_phase_) {
+    case GraspSubPhase::OPEN: {
+      if (move_state_ == MoveState::IDLE) {
         grasp_attempt_count_++;
+        if (grasp_attempt_count_ > max_grasp_attempts_) {
+          RCLCPP_WARN(get_node()->get_logger(),
+                      "Max grasp attempts (%d) reached, proceeding without object",
+                      max_grasp_attempts_);
+          phase_ = Phase::TEACH;
+          setStiffnessForPhase(Phase::TEACH);
+          initImpedanceState();
+          RCLCPP_INFO(get_node()->get_logger(), "GRASP -> TEACH (max attempts reached)");
+          break;
+        }
+        move_target_width_ = gripper_open_width_;
+        move_request_ = true;
+        move_state_ = MoveState::SENDING;
         RCLCPP_INFO(get_node()->get_logger(),
-                    "Grasp attempt %d/%d", grasp_attempt_count_, max_grasp_attempts_);
+                    "GRASP::OPEN: attempt %d/%d, opening gripper to %.4f",
+                    grasp_attempt_count_, max_grasp_attempts_, gripper_open_width_);
+      }
+      if (move_state_ == MoveState::SUCCEEDED || move_state_ == MoveState::FAILED) {
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "GRASP::OPEN -> CLOSING (move %s)",
+                    move_state_ == MoveState::SUCCEEDED ? "succeeded" : "failed");
+        move_state_ = MoveState::IDLE;
+        grasp_sub_phase_ = GraspSubPhase::CLOSING;
+        grasp_state_ = GraspState::IDLE;
+      }
+      break;
+    }
+
+    case GraspSubPhase::CLOSING: {
+      if (grasp_state_ == GraspState::IDLE) {
+        grasp_target_width_ = d_min_;
         grasp_request_ = true;
         grasp_state_ = GraspState::SENDING;
-      } else {
-        RCLCPP_WARN(get_node()->get_logger(),
-                    "Max grasp attempts (%d) reached, proceeding without object",
-                    max_grasp_attempts_);
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "GRASP::CLOSING: closing gripper to d_min=%.4f, force=%.1f",
+                    d_min_, grasp_force_);
+      }
+      if (grasp_state_ == GraspState::SUCCEEDED || grasp_state_ == GraspState::FAILED) {
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "GRASP::CLOSING -> CHECK (grasp %s, gripper_width=%.4f)",
+                    grasp_state_ == GraspState::SUCCEEDED ? "succeeded" : "failed",
+                    gripper_width_);
+        grasp_sub_phase_ = GraspSubPhase::CHECK;
+      }
+      break;
+    }
+
+    case GraspSubPhase::CHECK: {
+      if (gripper_width_valid_ && gripper_width_ >= d_min_ && gripper_width_ <= d_max_) {
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "GRASP::CHECK: object detected (width=%.4f in [%.4f, %.4f])",
+                    gripper_width_, d_min_, d_max_);
+        grasp_succeeded_ = true;
         phase_ = Phase::TEACH;
         setStiffnessForPhase(Phase::TEACH);
         initImpedanceState();
-        RCLCPP_INFO(get_node()->get_logger(), "GRASP -> TEACH (no object detected)");
-      }
-      break;
-
-    case GraspState::SUCCEEDED:
-      phase_ = Phase::TEACH;
-      setStiffnessForPhase(Phase::TEACH);
-      initImpedanceState();
-      RCLCPP_INFO(get_node()->get_logger(), "GRASP -> TEACH (object grasped)");
-      break;
-
-    case GraspState::FAILED:
-      if (grasp_attempt_count_ < max_grasp_attempts_) {
+        RCLCPP_INFO(get_node()->get_logger(), "GRASP -> TEACH (object grasped)");
+      } else if (!gripper_width_valid_ &&
+                 grasp_state_ == GraspState::SUCCEEDED) {
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "GRASP::CHECK: gripper width not available, grasp action succeeded, assuming object");
+        grasp_succeeded_ = true;
+        phase_ = Phase::TEACH;
+        setStiffnessForPhase(Phase::TEACH);
+        initImpedanceState();
+        RCLCPP_INFO(get_node()->get_logger(), "GRASP -> TEACH (grasp succeeded, no width data)");
+      } else {
+        RCLCPP_INFO(get_node()->get_logger(),
+                    "GRASP::CHECK: no object (width=%.4f not in [%.4f, %.4f]), attempt %d/%d",
+                    gripper_width_, d_min_, d_max_,
+                    grasp_attempt_count_, max_grasp_attempts_);
+        grasp_sub_phase_ = GraspSubPhase::OPEN;
+        move_state_ = MoveState::IDLE;
         grasp_state_ = GraspState::IDLE;
-      } else {
-        phase_ = Phase::TEACH;
-        setStiffnessForPhase(Phase::TEACH);
-        initImpedanceState();
-        RCLCPP_INFO(get_node()->get_logger(), "GRASP -> TEACH (max attempts reached)");
       }
       break;
-
-    case GraspState::SENDING:
-    case GraspState::WAITING:
-      break;
+    }
   }
 
   return controller_interface::return_type::OK;

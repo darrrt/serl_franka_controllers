@@ -118,6 +118,9 @@
       grasp_epsilon_outer: 0.005
       max_grasp_attempts: 3
       gripper_action_prefix: "franka_gripper"
+      d_min: 0.002
+      d_max: 0.008
+      gripper_open_width: 0.08
       teach_damping_translational: 10.0
       teach_damping_rotational: 1.0
       calib_rise_height: 0.15
