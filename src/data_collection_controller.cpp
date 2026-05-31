@@ -62,6 +62,13 @@ CallbackReturn DataCollectionController::on_init() {
 
     auto_declare<double>("calib_rise_height", 0.15);
     auto_declare<int>("calib_settle_cycles", 1000);
+    auto_declare<std::vector<double>>("calib_home_joint_positions",
+        {0.0, 0.168, 0.557, -2.193, -1.1723, 1.186, 0.110});
+    auto_declare<std::vector<double>>("calib_home_k_gains",
+        {600.0, 600.0, 600.0, 600.0, 250.0, 150.0, 50.0});
+    auto_declare<std::vector<double>>("calib_home_d_gains",
+        {50.0, 50.0, 50.0, 50.0, 30.0, 25.0, 15.0});
+    auto_declare<double>("calib_home_motion_duration", 5.0);
 
     auto_declare<double>("default_dx", 0.01);
     auto_declare<double>("default_dy", 0.0);
@@ -121,6 +128,24 @@ CallbackReturn DataCollectionController::on_configure(
 
   calib_rise_height_ = get_node()->get_parameter("calib_rise_height").as_double();
   calib_settle_cycles_ = get_node()->get_parameter("calib_settle_cycles").as_int();
+
+  auto home_jp = get_node()->get_parameter("calib_home_joint_positions").as_double_array();
+  if (home_jp.size() == 7) {
+    for (size_t i = 0; i < 7; ++i) calib_home_joint_positions_[i] = home_jp[i];
+  } else {
+    RCLCPP_WARN(get_node()->get_logger(),
+                "calib_home_joint_positions size=%zu, expected 7", home_jp.size());
+    calib_home_joint_positions_ = {0.0, 0.168, 0.557, -2.193, -1.1723, 1.186, 0.110};
+  }
+  auto home_kg = get_node()->get_parameter("calib_home_k_gains").as_double_array();
+  if (home_kg.size() == 7) {
+    for (size_t i = 0; i < 7; ++i) calib_home_k_gains_[i] = home_kg[i];
+  }
+  auto home_dg = get_node()->get_parameter("calib_home_d_gains").as_double_array();
+  if (home_dg.size() == 7) {
+    for (size_t i = 0; i < 7; ++i) calib_home_d_gains_[i] = home_dg[i];
+  }
+  calib_home_motion_duration_ = get_node()->get_parameter("calib_home_motion_duration").as_double();
 
   default_dx_ = get_node()->get_parameter("default_dx").as_double();
   default_dy_ = get_node()->get_parameter("default_dy").as_double();
@@ -921,16 +946,23 @@ controller_interface::return_type DataCollectionController::updateTeach() {
     teach_start_orientation_ = Eigen::Quaterniond(transform.linear());
     slide_base_z_ = teach_start_position_.z();
 
+    calib_rise_position_ = teach_start_position_;
+    calib_rise_position_.z() += calib_rise_height_;
+    calib_rise_orientation_ = teach_start_orientation_;
+
     RCLCPP_INFO(get_node()->get_logger(),
-                "TEACH trigger: start_pos=[%.4f, %.4f, %.4f], slide_base_z=%.4f",
+                "TEACH trigger: start_pos=[%.4f, %.4f, %.4f], calib_rise_target=[%.4f, %.4f, %.4f]",
                 teach_start_position_.x(), teach_start_position_.y(),
-                teach_start_position_.z(), slide_base_z_);
+                teach_start_position_.z(),
+                calib_rise_position_.x(), calib_rise_position_.y(),
+                calib_rise_position_.z());
 
     phase_ = Phase::CALIBRATE;
     calib_sub_phase_ = CalibSubPhase::RISE;
     calib_current_config_ = 0;
     calib_record_count_ = 0;
     calib_settle_count_ = 0;
+    calib_home_cycle_count_ = 0;
 
     int n = static_cast<int>(calib_orientations_.size());
     calib_Y_stack_.resize(6 * n, 4);
@@ -956,10 +988,6 @@ controller_interface::return_type DataCollectionController::updateCalibrate() {
       Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
       Eigen::Vector3d current_pos = transform.translation();
 
-      calib_rise_position_ = current_pos;
-      calib_rise_position_.z() += calib_rise_height_;
-      calib_rise_orientation_ = Eigen::Quaterniond(transform.linear());
-
       position_d_target_ = calib_rise_position_;
       orientation_d_target_ = calib_rise_orientation_;
 
@@ -969,12 +997,78 @@ controller_interface::return_type DataCollectionController::updateCalibrate() {
         last_cmd_tau_[i] = tau_d(i);
       }
 
-      if ((current_pos - calib_rise_position_).norm() < 0.005) {
-        calib_sub_phase_ = CalibSubPhase::MOVE_TO_CONFIG;
-        calib_current_config_ = 0;
-        calib_settle_count_ = 0;
+      if ((current_pos - calib_rise_position_).norm() < 0.015) {
+        calib_sub_phase_ = CalibSubPhase::MOVE_TO_HOME_CONFIG;
+        for (size_t i = 0; i < 7; ++i) {
+          calib_home_initial_joint_pose_[i] = q_[i];
+        }
+        calib_home_cycle_count_ = 0;
         RCLCPP_INFO(get_node()->get_logger(),
-                    "CALIBRATE: risen to safe height z=%.4f", calib_rise_position_.z());
+                    "CALIBRATE: risen to safe height z=%.4f, moving to home config",
+                    calib_rise_position_.z());
+      }
+      break;
+    }
+
+    case CalibSubPhase::MOVE_TO_HOME_CONFIG: {
+      calib_home_cycle_count_++;
+      double t = static_cast<double>(calib_home_cycle_count_) /
+                 (calib_home_motion_duration_ * 1000.0);
+
+      for (size_t i = 0; i < 7; ++i) {
+        double q_cur = state_interfaces_[i].get_value();
+        double dq_cur = state_interfaces_[num_joints_ + i].get_value();
+
+        double s;
+        if (t >= 1.0) {
+          s = 1.0;
+        } else {
+          s = 6.0 * std::pow(t, 5) - 15.0 * std::pow(t, 4) + 10.0 * std::pow(t, 3);
+        }
+
+        double q_d = calib_home_initial_joint_pose_[i] +
+                     s * (calib_home_joint_positions_[i] - calib_home_initial_joint_pose_[i]);
+        double dq_d = 0.0;
+        if (t < 1.0) {
+          dq_d = (30.0 * std::pow(t, 4) - 60.0 * std::pow(t, 3) + 30.0 * std::pow(t, 2)) *
+                 (calib_home_joint_positions_[i] - calib_home_initial_joint_pose_[i]) /
+                 calib_home_motion_duration_;
+        }
+
+        double tau = calib_home_k_gains_[i] * (q_d - q_cur) +
+                     calib_home_d_gains_[i] * (dq_d - dq_cur);
+        command_interfaces_[i].set_value(tau);
+        last_cmd_tau_[i] = tau;
+        tau_J_d_last_[i] = tau;
+      }
+
+      if (t >= 1.0) {
+        bool close_enough = true;
+        for (size_t i = 0; i < 7; ++i) {
+          double q_cur = state_interfaces_[i].get_value();
+          if (std::abs(q_cur - calib_home_joint_positions_[i]) > 0.05) {
+            close_enough = false;
+            break;
+          }
+        }
+
+        if (close_enough) {
+          auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+          Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+          calib_rise_position_ = transform.translation();
+          calib_rise_orientation_ = Eigen::Quaterniond(transform.linear());
+
+          initImpedanceState();
+
+          calib_sub_phase_ = CalibSubPhase::MOVE_TO_CONFIG;
+          calib_current_config_ = 0;
+          calib_settle_count_ = 0;
+
+          RCLCPP_INFO(get_node()->get_logger(),
+                      "CALIBRATE: reached home config, calib_base_pos=[%.4f, %.4f, %.4f]",
+                      calib_rise_position_.x(), calib_rise_position_.y(),
+                      calib_rise_position_.z());
+        }
       }
       break;
     }
@@ -1000,8 +1094,11 @@ controller_interface::return_type DataCollectionController::updateCalibrate() {
       Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
       Eigen::Quaterniond current_orient(transform.linear());
 
-      double orient_error = current_orient.angularDistance(target_orient);
-      if (orient_error < 0.05) {
+      double orient_error = current_orient.angularDistance(target_orient); // 1. 姿态比较接近了（放宽到0.15 rad）
+      // bool robot_stopped = dq_.norm() < 0.01; // 或者末端速度很小
+      // 引入 Eigen 映射来计算 std::array 的范数
+      bool robot_stopped = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(dq_.data()).norm() < 0.01;
+      if (orient_error < 0.15 && robot_stopped) {
         calib_sub_phase_ = CalibSubPhase::SETTLE;
         calib_settle_count_ = 0;
         RCLCPP_INFO(get_node()->get_logger(),

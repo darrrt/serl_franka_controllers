@@ -61,12 +61,13 @@ class DataCollectionController : public controller_interface::ControllerInterfac
 
   enum class CalibSubPhase {
     RISE = 0,
-    MOVE_TO_CONFIG = 1,
-    SETTLE = 2,
-    RECORD = 3,
-    SOLVE = 4,
-    RETURN = 5,
-    FINISHED = 6
+    MOVE_TO_HOME_CONFIG = 1,
+    MOVE_TO_CONFIG = 2,
+    SETTLE = 3,
+    RECORD = 4,
+    SOLVE = 5,
+    RETURN = 6,
+    FINISHED = 7
   };
 
   enum class GraspState {
@@ -222,6 +223,12 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   int calib_current_config_ = 0;
   Eigen::Vector3d calib_rise_position_;
   Eigen::Quaterniond calib_rise_orientation_;
+  std::array<double, 7> calib_home_joint_positions_{};
+  std::array<double, 7> calib_home_k_gains_{};
+  std::array<double, 7> calib_home_d_gains_{};
+  double calib_home_motion_duration_ = 5.0;
+  int calib_home_cycle_count_ = 0;
+  std::array<double, 7> calib_home_initial_joint_pose_{};
   std::vector<Eigen::Quaterniond> calib_orientations_;
   Eigen::VectorXd calib_W_stack_;
   Eigen::MatrixXd calib_Y_stack_;
