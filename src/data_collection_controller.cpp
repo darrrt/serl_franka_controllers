@@ -1362,6 +1362,11 @@ controller_interface::return_type DataCollectionController::updateApproach() {
   position_d_target_ = target_pos;
   orientation_d_target_ = teach_start_orientation_;
 
+  if (approach_start_cycle_ == 0) {
+    approach_start_cycle_ = update_count_;
+    position_filter_ = 0.1;
+  }
+
   Eigen::Matrix<double, 7, 1> tau_d;
   computeImpedanceControl(tau_d);
   for (size_t i = 0; i < 7; ++i) {
@@ -1373,20 +1378,36 @@ controller_interface::return_type DataCollectionController::updateApproach() {
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
   Eigen::Vector3d current_pos = transform.translation();
 
-  if ((current_pos - target_pos).norm() < 0.003) {
+  double dist = (current_pos - target_pos).norm();
+  int elapsed = update_count_ - approach_start_cycle_;
+  bool reached = dist < 0.005;
+  bool timeout = elapsed > approach_timeout_cycles_;
+
+  if (reached || timeout) {
     phase_ = Phase::DESCEND;
     baseline_force_z_ = filtered_force_z_;
     force_error_integral_ = 0.0;
     z_offset_ = 0.0;
+    position_filter_ = 0.005;
 
     auto pose_matrix2 = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
     Eigen::Affine3d transform2(Eigen::Matrix4d::Map(pose_matrix2.data()));
     descend_start_z_ = transform2.translation().z();
 
     setStiffnessForPhase(Phase::DESCEND);
-    RCLCPP_INFO(get_node()->get_logger(),
-                "APPROACH -> DESCEND (target=[%.4f, %.4f, %.4f], baseline_force=%.3f)",
-                target_pos.x(), target_pos.y(), target_pos.z(), baseline_force_z_);
+
+    if (timeout && !reached) {
+      RCLCPP_WARN(get_node()->get_logger(),
+                  "APPROACH timeout after %.1fs (dist=%.4f, pos=[%.4f, %.4f, %.4f], target=[%.4f, %.4f, %.4f], force_z=%.3f). Proceeding to DESCEND.",
+                  elapsed / 1000.0, dist,
+                  current_pos.x(), current_pos.y(), current_pos.z(),
+                  target_pos.x(), target_pos.y(), target_pos.z(),
+                  filtered_force_z_);
+    } else {
+      RCLCPP_INFO(get_node()->get_logger(),
+                  "APPROACH -> DESCEND (target=[%.4f, %.4f, %.4f], baseline_force=%.3f)",
+                  target_pos.x(), target_pos.y(), target_pos.z(), baseline_force_z_);
+    }
   }
 
   return controller_interface::return_type::OK;
@@ -1555,6 +1576,7 @@ controller_interface::return_type DataCollectionController::updateWaitParams() {
       phase_ = Phase::APPROACH;
       setStiffnessForPhase(Phase::APPROACH);
       initImpedanceState();
+      approach_start_cycle_ = 0;
 
       RCLCPP_INFO(get_node()->get_logger(),
                   "WAIT_PARAMS -> APPROACH (dx=%.4f dy=%.4f dx_step=%.4f dy_step=%.4f F0=%.2f)",

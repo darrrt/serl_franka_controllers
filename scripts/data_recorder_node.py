@@ -73,6 +73,7 @@ class DataRecorderNode(Node):
         self.current_rt_file = None
         self.current_rt_writer = None
         self.area_count = 0
+        self.calib_saved = False
 
         self.phase_csv_path = os.path.join(self.run_dir, 'phase_log.csv')
         self.phase_csv_file = open(self.phase_csv_path, 'w', newline='')
@@ -201,7 +202,8 @@ class DataRecorderNode(Node):
                 f.write(f'{now.nanoseconds / 1e9}\n')
 
     def calib_callback(self, msg: Float64MultiArray):
-        if len(msg.data) >= 4:
+        if len(msg.data) >= 4 and not self.calib_saved:
+            self.calib_saved = True
             calib_data = {
                 'payload_mass_kg': msg.data[0],
                 'payload_com': {

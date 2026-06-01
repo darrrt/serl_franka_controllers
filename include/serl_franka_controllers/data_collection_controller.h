@@ -279,6 +279,8 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   double descend_start_z_ = 0.0;
 
   double approach_height_ = 0.05;
+  int approach_start_cycle_ = 0;
+  int approach_timeout_cycles_ = 10000;
 
   Eigen::Vector3d slide_start_xy_;
   Eigen::Vector3d slide_target_xy_;
