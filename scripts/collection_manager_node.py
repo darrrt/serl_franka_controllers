@@ -23,28 +23,12 @@ class CollectionManagerNode(Node):
             'collection_config', ''
         ).get_parameter_value().string_value
 
-        self.board_origin = self.declare_parameter(
-            'board_origin', [0.0, 0.0, 0.0]
-        ).get_parameter_value().double_array_value
-
-        self.default_dx = self.declare_parameter(
-            'default_dx', 0.01
-        ).get_parameter_value().double_value
-
-        self.default_dy = self.declare_parameter(
-            'default_dy', 0.0
-        ).get_parameter_value().double_value
-
-        self.default_dx_step = self.declare_parameter(
-            'default_dx_step', 0.01
-        ).get_parameter_value().double_value
-
-        self.default_dy_step = self.declare_parameter(
-            'default_dy_step', 0.0
-        ).get_parameter_value().double_value
-
         self.default_f0 = self.declare_parameter(
             'default_f0', 1.0
+        ).get_parameter_value().double_value
+
+        self.default_v0 = self.declare_parameter(
+            'default_v0', 0.01
         ).get_parameter_value().double_value
 
         self.params_topic = f'{self.controller_prefix}/collection_params'
@@ -52,6 +36,7 @@ class CollectionManagerNode(Node):
         self.completion_topic = f'{self.controller_prefix}/completion'
         self.teach_trigger_topic = f'{self.controller_prefix}/teach_trigger'
         self.reset_topic = f'{self.controller_prefix}/reset'
+        self.task_name_topic = f'{self.controller_prefix}/task_name'
 
         self.params_pub = self.create_publisher(
             Float64MultiArray, self.params_topic, 10)
@@ -59,6 +44,8 @@ class CollectionManagerNode(Node):
             Bool, self.teach_trigger_topic, 10)
         self.reset_pub = self.create_publisher(
             Bool, self.reset_topic, 10)
+        self.task_name_pub = self.create_publisher(
+            String, self.task_name_topic, 10)
         self.phase_sub = self.create_subscription(
             String, self.phase_topic, self.phase_callback, 10)
         self.completion_sub = self.create_subscription(
@@ -74,11 +61,12 @@ class CollectionManagerNode(Node):
         self.task_names = []
 
         self.get_logger().info(
-            f'Collection manager started.\n'
+            f'Collection manager started (v4 protocol).\n'
             f'  Publishing to: {self.params_topic}, {self.teach_trigger_topic}, {self.reset_topic}\n'
             f'  Monitoring: {self.phase_topic}, {self.completion_topic}\n'
             f'  Collection config: {self.collection_config if self.collection_config else "(none)"}\n'
-            f'  Board origin: [{self.board_origin[0]:.4f}, {self.board_origin[1]:.4f}, {self.board_origin[2]:.4f}]\n'
+            f'  Protocol: [board_x, board_y, F_0, v_0, switch_phase]\n'
+            f'  (coordinates are in calibration board frame, controller converts to robot frame)\n'
             f'  Commands:\n'
             f'    [1] = confirm teach position (TEACH -> next phase)\n'
             f'    [a] = add default task\n'
@@ -123,44 +111,46 @@ class CollectionManagerNode(Node):
         self.current_task = self.task_queue.pop(0)
 
         task = self.current_task
+        task_name = task.get('name', 'unnamed')
+
+        task_name_msg = String()
+        task_name_msg.data = task_name
+        self.task_name_pub.publish(task_name_msg)
+
         msg = Float64MultiArray()
         msg.data = [
-            task['dx'], task['dy'],
-            task['dx_step'], task['dy_step'],
+            task['board_x'],
+            task['board_y'],
             task['F0'],
-            1.0 if task.get('switch_area', False) else 0.0,
-            task.get('target_x', 0.0),
-            task.get('target_y', 0.0),
+            task['v0'],
+            1.0 if task.get('switch_phase', False) else 0.0,
         ]
 
         self.params_pub.publish(msg)
         self.is_waiting_params = False
         self.cycle_complete = False
 
-        task_name = task.get('name', 'unnamed')
         self.get_logger().info(
-            f'Sent task [{task_name}]: dx={task["dx"]:.4f} dy={task["dy"]:.4f} '
-            f'dx_step={task["dx_step"]:.4f} dy_step={task["dy_step"]:.4f} '
-            f'F0={task["F0"]:.2f} '
-            f'switch_area={task.get("switch_area", False)} '
-            f'target=[{task.get("target_x", 0):.4f}, {task.get("target_y", 0):.4f}]')
+            f'Sent task [{task_name}]: board=[{task["board_x"]:.4f}, {task["board_y"]:.4f}] '
+            f'F0={task["F0"]:.2f} v0={task["v0"]:.4f} '
+            f'switch_phase={task.get("switch_phase", False)}')
 
-    def add_task(self, dx=0.01, dy=0.0, dx_step=0.01, dy_step=0.0, F0=1.0,
-                 switch_area=False, target_x=0.0, target_y=0.0, name='manual'):
+    def add_task(self, board_x=0.0, board_y=0.0, F0=1.0, v0=0.01,
+                 switch_phase=False, name='manual'):
         task = {
             'name': name,
-            'dx': dx, 'dy': dy,
-            'dx_step': dx_step, 'dy_step': dy_step,
+            'board_x': board_x,
+            'board_y': board_y,
             'F0': F0,
-            'switch_area': switch_area,
-            'target_x': target_x, 'target_y': target_y,
+            'v0': v0,
+            'switch_phase': switch_phase,
         }
         self.task_queue.append(task)
         self.task_names.append(name)
         self.get_logger().info(
             f'Task added [{name}] (queue size: {len(self.task_queue)}): '
-            f'dx={dx:.4f} dy={dy:.4f} dx_step={dx_step:.4f} dy_step={dy_step:.4f} '
-            f'F0={F0:.2f} switch_area={switch_area}')
+            f'board=[{board_x:.4f}, {board_y:.4f}] '
+            f'F0={F0:.2f} v0={v0:.4f} switch_phase={switch_phase}')
 
     def load_tasks_from_config(self, config_path=None):
         if config_path is None:
@@ -180,80 +170,67 @@ class CollectionManagerNode(Node):
         except json.JSONDecodeError as e:
             self.get_logger().error(
                 f'Config file is not valid JSON: {config_path}\n'
-                f'  JSON error: {e}\n'
-                f'  Hint: collection_config expects a JSON file (e.g. calibration_sandpaper_240-1500.json), not a YAML file')
+                f'  JSON error: {e}')
             return
         except Exception as e:
             self.get_logger().error(f'Failed to read config file: {e}')
             return
 
-        origin_x = float(self.board_origin[0])
-        origin_y = float(self.board_origin[1])
-
         if 'calibration_board' in config:
-            self._load_calibration_board(config['calibration_board'], origin_x, origin_y)
+            self._load_calibration_board(config['calibration_board'])
         elif 'tasks' in config:
-            self._load_tasks_list(config['tasks'], origin_x, origin_y)
+            self._load_tasks_list(config['tasks'])
         else:
             self.get_logger().warn(
                 'Config file has no "calibration_board" or "tasks" key')
 
-    def _load_calibration_board(self, board_config, origin_x, origin_y):
-        layout = board_config.get('layout', {})
+    def _load_calibration_board(self, board_config):
         points = board_config.get('points_3d', {}).get('data', [])
 
         if not points:
             self.get_logger().warn('No points_3d data in calibration_board config')
             return
 
-        grid_size_x = layout.get('grid_size_x', 30.0)
-        grid_size_y = layout.get('grid_size_y', 30.0)
-
         self.get_logger().info(
-            f'Loading calibration board: {len(points)} cells, '
-            f'grid_size=({grid_size_x}, {grid_size_y})mm, '
-            f'origin=({origin_x:.4f}, {origin_y:.4f})m')
+            f'Loading calibration board: {len(points)} cells (board frame)')
 
+        prev_row = None
         for i, point in enumerate(points):
             name = point.get('name', f'cell_{i}')
             pos_mm = point.get('pos_mm', [0.0, 0.0, 0.0])
+            row = point.get('row', 0)
 
-            target_x = origin_x + pos_mm[0] / 1000.0
-            target_y = origin_y + pos_mm[1] / 1000.0
+            board_x = pos_mm[0] / 1000.0
+            board_y = pos_mm[1] / 1000.0
 
-            switch_area = (i > 0)
+            switch_phase = (prev_row is not None and row != prev_row) or (i == 0)
 
             task = {
                 'name': name,
-                'dx': self.default_dx,
-                'dy': self.default_dy,
-                'dx_step': self.default_dx_step,
-                'dy_step': self.default_dy_step,
+                'board_x': board_x,
+                'board_y': board_y,
                 'F0': self.default_f0,
-                'switch_area': switch_area,
-                'target_x': target_x,
-                'target_y': target_y,
+                'v0': self.default_v0,
+                'switch_phase': switch_phase,
             }
             self.task_queue.append(task)
             self.task_names.append(name)
+            prev_row = row
 
         self.get_logger().info(
             f'Loaded {len(points)} tasks from calibration board config. '
             f'Queue size: {len(self.task_queue)}')
 
-    def _load_tasks_list(self, tasks, origin_x, origin_y):
+    def _load_tasks_list(self, tasks):
         for i, task_data in enumerate(tasks):
             name = task_data.get('name', f'task_{i}')
             task = {
                 'name': name,
-                'dx': task_data.get('dx', self.default_dx),
-                'dy': task_data.get('dy', self.default_dy),
-                'dx_step': task_data.get('dx_step', self.default_dx_step),
-                'dy_step': task_data.get('dy_step', self.default_dy_step),
+                'board_x': task_data.get('board_x', 0.0),
+                'board_y': task_data.get('board_y', 0.0),
                 'F0': task_data.get('F0', self.default_f0),
-                'switch_area': task_data.get('switch_area', False),
-                'target_x': task_data.get('target_x', 0.0) + origin_x,
-                'target_y': task_data.get('target_y', 0.0) + origin_y,
+                'v0': task_data.get('v0', self.default_v0),
+                'switch_phase': task_data.get('switch_phase', False),
             }
             self.task_queue.append(task)
             self.task_names.append(name)
@@ -318,16 +295,13 @@ def main(args=None):
                     node.get_logger().info('-> Teach trigger sent')
                 elif key == 'a':
                     node.add_task(
-                        dx=node.default_dx, dy=node.default_dy,
-                        dx_step=node.default_dx_step, dy_step=node.default_dy_step,
-                        F0=node.default_f0)
+                        board_x=0.032, board_y=0.0,
+                        F0=node.default_f0, v0=node.default_v0)
                 elif key == 's':
                     node.add_task(
-                        dx=node.default_dx, dy=node.default_dy,
-                        dx_step=node.default_dx_step, dy_step=node.default_dy_step,
-                        F0=node.default_f0,
-                        switch_area=True, target_x=0.3, target_y=0.0,
-                        name='area_switch')
+                        board_x=0.032, board_y=0.0,
+                        F0=node.default_f0, v0=node.default_v0,
+                        switch_phase=True, name='area_switch')
                 elif key == 'l':
                     node.load_tasks_from_config()
                 elif key == 'r':

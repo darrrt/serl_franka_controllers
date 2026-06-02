@@ -3,7 +3,9 @@
 #include <bitset>
 #include <chrono>
 #include <cmath>
+#include <iomanip>
 #include <memory>
+#include <sstream>
 #include <string>
 
 #include <franka/model.h>
@@ -70,11 +72,10 @@ CallbackReturn DataCollectionController::on_init() {
         {50.0, 50.0, 50.0, 50.0, 30.0, 25.0, 15.0});
     auto_declare<double>("calib_home_motion_duration", 5.0);
 
-    auto_declare<double>("default_dx", 0.01);
-    auto_declare<double>("default_dy", 0.0);
-    auto_declare<double>("default_dx_step", 0.01);
-    auto_declare<double>("default_dy_step", 0.0);
     auto_declare<double>("default_f0", 1.0);
+    auto_declare<double>("default_v0", 0.01);
+    auto_declare<double>("vel_filter_alpha", 0.05);
+    auto_declare<double>("force_spike_threshold", 5.0);
 
     auto_declare<double>("target_force", 1.0);
     auto_declare<double>("descend_speed", 0.005);
@@ -88,8 +89,14 @@ CallbackReturn DataCollectionController::on_init() {
 
     auto_declare<bool>("skip_grasp", false);
     auto_declare<bool>("skip_calibrate", false);
+    auto_declare<bool>("skip_teach_init", false);
     auto_declare<double>("payload_mass", 0.0);
     auto_declare<std::vector<double>>("payload_com", {0.0, 0.0, 0.0});
+    auto_declare<double>("start_pos_x", 0.0);
+    auto_declare<double>("start_pos_y", 0.0);
+    auto_declare<double>("start_pos_z", 0.0);
+    auto_declare<std::vector<double>>("start_joint_angles",
+        {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
 
     auto_declare<double>("translational_stiffness_xy", 2000.0);
     auto_declare<double>("translational_stiffness_z", 1500.0);
@@ -153,11 +160,10 @@ CallbackReturn DataCollectionController::on_configure(
   }
   calib_home_motion_duration_ = get_node()->get_parameter("calib_home_motion_duration").as_double();
 
-  default_dx_ = get_node()->get_parameter("default_dx").as_double();
-  default_dy_ = get_node()->get_parameter("default_dy").as_double();
-  default_dx_step_ = get_node()->get_parameter("default_dx_step").as_double();
-  default_dy_step_ = get_node()->get_parameter("default_dy_step").as_double();
   default_f0_ = get_node()->get_parameter("default_f0").as_double();
+  default_v0_ = get_node()->get_parameter("default_v0").as_double();
+  vel_filter_alpha_ = get_node()->get_parameter("vel_filter_alpha").as_double();
+  force_spike_threshold_ = get_node()->get_parameter("force_spike_threshold").as_double();
 
   target_force_ = get_node()->get_parameter("target_force").as_double();
   descend_speed_ = get_node()->get_parameter("descend_speed").as_double();
@@ -171,6 +177,7 @@ CallbackReturn DataCollectionController::on_configure(
 
   skip_grasp_ = get_node()->get_parameter("skip_grasp").as_bool();
   skip_calibrate_ = get_node()->get_parameter("skip_calibrate").as_bool();
+  skip_teach_init_ = get_node()->get_parameter("skip_teach_init").as_bool();
 
   if (skip_calibrate_) {
     payload_mass_ = get_node()->get_parameter("payload_mass").as_double();
@@ -234,6 +241,12 @@ CallbackReturn DataCollectionController::on_configure(
   rt_state_publisher_ = get_node()->create_publisher<sensor_msgs::msg::JointState>(
       "~/rt_state", rclcpp::SystemDefaultsQoS());
 
+  start_pos_publisher_ = get_node()->create_publisher<std_msgs::msg::Float64MultiArray>(
+      "~/start_pos", rclcpp::SystemDefaultsQoS());
+
+  task_event_publisher_ = get_node()->create_publisher<std_msgs::msg::String>(
+      "~/task_event", rclcpp::SystemDefaultsQoS());
+
   grasp_client_ = rclcpp_action::create_client<franka_msgs::action::Grasp>(
       get_node(), gripper_action_prefix_ + "/grasp");
   move_client_ = rclcpp_action::create_client<franka_msgs::action::Move>(
@@ -254,6 +267,10 @@ CallbackReturn DataCollectionController::on_configure(
   reset_subscriber_ = get_node()->create_subscription<std_msgs::msg::Bool>(
       "~/reset", rclcpp::SystemDefaultsQoS(),
       [this](const std_msgs::msg::Bool::SharedPtr msg) { resetCallback(msg); });
+
+  task_name_subscriber_ = get_node()->create_subscription<std_msgs::msg::String>(
+      "~/task_name", rclcpp::SystemDefaultsQoS(),
+      [this](const std_msgs::msg::String::SharedPtr msg) { taskNameCallback(msg); });
 
   gripper_state_subscriber_ = get_node()->create_subscription<sensor_msgs::msg::JointState>(
       gripper_action_prefix_ + "/joint_states", rclcpp::SystemDefaultsQoS(),
@@ -279,8 +296,23 @@ CallbackReturn DataCollectionController::on_activate(
   robot_state_ptr_ = getRobotStatePtr();
 
   phase_ = Phase::GRASP;
-  if (skip_grasp_ && skip_calibrate_) {
-    phase_ = Phase::TEACH;
+  if (skip_grasp_ && skip_calibrate_ && skip_teach_init_) {
+    phase_ = Phase::WAIT_PARAMS;
+    loadStartPosFromParams();
+  } else if (skip_grasp_ && skip_teach_init_) {
+    phase_ = Phase::CALIBRATE;
+    loadStartPosFromParams();
+    calib_sub_phase_ = CalibSubPhase::RISE;
+    calib_current_config_ = 0;
+    calib_record_count_ = 0;
+    calib_settle_count_ = 0;
+    calib_home_cycle_count_ = 0;
+    int n = static_cast<int>(calib_orientations_.size());
+    calib_Y_stack_.resize(6 * n, 4);
+    calib_W_stack_.resize(6 * n);
+    calib_Y_stack_.setZero();
+    calib_W_stack_.setZero();
+    setStiffnessForPhase(Phase::CALIBRATE);
   } else if (skip_grasp_) {
     phase_ = Phase::TEACH;
   }
@@ -305,12 +337,13 @@ CallbackReturn DataCollectionController::on_activate(
   tau_J_d_last_.fill(0.0);
   last_cmd_tau_.fill(0.0);
 
-  collection_dx_ = default_dx_;
-  collection_dy_ = default_dy_;
-  collection_dx_step_ = default_dx_step_;
-  collection_dy_step_ = default_dy_step_;
-  collection_f0_ = default_f0_;
   collection_params_received_ = false;
+  current_smooth_v_ = 0.0;
+  force_spike_active_ = false;
+  prev_force_z_ = 0.0;
+  force_z_hold_ = 0.0;
+  cmd_active_ = CollectionCmd{};
+  current_task_name_ = "";
 
   if (skip_calibrate_ && calib_loaded_from_params_) {
     calib_publish_delay_ = 1000;
@@ -763,37 +796,41 @@ void DataCollectionController::teachTriggerCallback(
 
 void DataCollectionController::collectionParamsCallback(
     const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
-  if (msg->data.size() >= 5) {
-    collection_dx_ = msg->data[0];
-    collection_dy_ = msg->data[1];
-    collection_dx_step_ = msg->data[2];
-    collection_dy_step_ = msg->data[3];
-    collection_f0_ = msg->data[4];
-
-    collection_switch_area_ = false;
-    collection_target_x_ = 0.0;
-    collection_target_y_ = 0.0;
-
-    if (msg->data.size() >= 6) {
-      collection_switch_area_ = (msg->data[5] > 0.5);
-    }
-    if (msg->data.size() >= 8) {
-      collection_target_x_ = msg->data[6];
-      collection_target_y_ = msg->data[7];
-    }
-
-    collection_params_received_ = true;
-    RCLCPP_INFO(get_node()->get_logger(),
-                "Collection params: dx=%.4f dy=%.4f dx_step=%.4f dy_step=%.4f F0=%.2f "
-                "switch_area=%s target=[%.4f, %.4f]",
-                collection_dx_, collection_dy_, collection_dx_step_,
-                collection_dy_step_, collection_f0_,
-                collection_switch_area_ ? "true" : "false",
-                collection_target_x_, collection_target_y_);
-  } else {
+  if (msg->data.size() < 5) {
     RCLCPP_WARN(get_node()->get_logger(),
-                "Collection params need >=5 values, got %zu", msg->data.size());
+                "Collection params need >=5 values [board_x, board_y, F_0, v_0, switch_phase], got %zu",
+                msg->data.size());
+    return;
   }
+
+  CollectionCmd cmd;
+  cmd.board_x = msg->data[0];
+  cmd.board_y = msg->data[1];
+  cmd.f0 = msg->data[2];
+  cmd.v0 = msg->data[3];
+  cmd.switch_phase = (msg->data[4] > 0.5);
+
+  if (cmd.v0 <= 0.001) {
+    RCLCPP_WARN(get_node()->get_logger(), "v_0 too small (%.4f), clamping to 0.001", cmd.v0);
+    cmd.v0 = 0.001;
+  }
+
+  cmd_buffer_.writeFromNonRT(cmd);
+
+  current_task_name_ = incoming_task_name_;
+  cmd_task_name_storage_ = current_task_name_;
+  cmd_task_name_.store(cmd_task_name_storage_.c_str());
+
+  collection_params_received_ = true;
+  publishTaskEvent(1, current_task_name_);
+
+  RCLCPP_INFO(get_node()->get_logger(),
+              "Collection params (v4): board=[%.4f, %.4f] F_0=%.2f v_0=%.4f "
+              "switch_phase=%s task=%s",
+              cmd.board_x, cmd.board_y,
+              cmd.f0, cmd.v0,
+              cmd.switch_phase ? "true" : "false",
+              current_task_name_.c_str());
 }
 
 void DataCollectionController::resetCallback(
@@ -814,9 +851,74 @@ void DataCollectionController::resetCallback(
   z_offset_ = 0.0;
   safety_violation_ = false;
   collection_params_received_ = false;
+  current_task_name_ = "";
+  current_smooth_v_ = 0.0;
+  force_spike_active_ = false;
+  prev_force_z_ = 0.0;
+  force_z_hold_ = 0.0;
+  cmd_active_ = CollectionCmd{};
 
   initImpedanceState();
   RCLCPP_INFO(get_node()->get_logger(), "Controller reset -> GRASP");
+}
+
+void DataCollectionController::taskNameCallback(
+    const std_msgs::msg::String::SharedPtr msg) {
+  incoming_task_name_ = msg->data;
+  RCLCPP_INFO(get_node()->get_logger(), "Task name received: %s", incoming_task_name_.c_str());
+}
+
+void DataCollectionController::loadStartPosFromParams() {
+  double sx = get_node()->get_parameter("start_pos_x").as_double();
+  double sy = get_node()->get_parameter("start_pos_y").as_double();
+  double sz = get_node()->get_parameter("start_pos_z").as_double();
+  teach_start_position_ = Eigen::Vector3d(sx, sy, sz);
+  slide_base_z_ = sz;
+
+  auto sja = get_node()->get_parameter("start_joint_angles").as_double_array();
+  if (sja.size() == 7) {
+    for (size_t i = 0; i < 7; ++i) q_[i] = sja[i];
+  }
+
+  auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
+  Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
+  teach_start_orientation_ = Eigen::Quaterniond(transform.linear());
+
+  calib_rise_position_ = teach_start_position_;
+  calib_rise_position_.z() += calib_rise_height_;
+  calib_rise_orientation_ = teach_start_orientation_;
+
+  RCLCPP_INFO(get_node()->get_logger(),
+              "Loaded start pos from params: [%.4f, %.4f, %.4f], slide_base_z=%.4f",
+              sx, sy, sz, slide_base_z_);
+
+  publishStartPos();
+}
+
+void DataCollectionController::publishStartPos() {
+  std_msgs::msg::Float64MultiArray msg;
+  msg.data = {
+      teach_start_position_.x(), teach_start_position_.y(), teach_start_position_.z(),
+      q_[0], q_[1], q_[2], q_[3], q_[4], q_[5], q_[6]
+  };
+  start_pos_publisher_->publish(msg);
+  RCLCPP_INFO(get_node()->get_logger(),
+              "Published start_pos: [%.4f, %.4f, %.4f]",
+              teach_start_position_.x(), teach_start_position_.y(), teach_start_position_.z());
+}
+
+void DataCollectionController::publishTaskEvent(int event_type, const std::string& task_name) {
+  std_msgs::msg::String msg;
+  std::ostringstream oss;
+  auto now = get_node()->now();
+  oss << event_type << ","
+      << now.seconds() << "." << std::setfill('0') << std::setw(9) << now.nanoseconds() % 1000000000 << ","
+      << task_name << ","
+      << cmd_active_.board_x << "," << cmd_active_.board_y << ","
+      << cmd_active_.f0 << "," << cmd_active_.v0 << ","
+      << (cmd_active_.switch_phase ? 1 : 0);
+  msg.data = oss.str();
+  task_event_publisher_->publish(msg);
 }
 
 controller_interface::return_type DataCollectionController::update(
@@ -826,8 +928,26 @@ controller_interface::return_type DataCollectionController::update(
 
   if (robot_state_ptr_) {
     double raw_force_z = robot_state_ptr_->O_F_ext_hat_K[2];
-    filtered_force_z_ = force_filter_alpha_ * raw_force_z +
-                        (1.0 - force_filter_alpha_) * filtered_force_z_;
+    double new_filtered = force_filter_alpha_ * raw_force_z +
+                          (1.0 - force_filter_alpha_) * filtered_force_z_;
+
+    double force_delta = std::abs(new_filtered - prev_force_z_);
+    if (force_delta > force_spike_threshold_ && phase_ == Phase::SLIDE) {
+      force_spike_active_ = true;
+      force_z_hold_ = filtered_force_z_;
+      RCLCPP_WARN(get_node()->get_logger(),
+                  "Force spike detected: delta=%.3f > threshold=%.3f, holding z_force=%.3f",
+                  force_delta, force_spike_threshold_, force_z_hold_);
+    } else if (force_spike_active_ && force_delta < force_spike_threshold_ * 0.5) {
+      force_spike_active_ = false;
+    }
+
+    if (force_spike_active_) {
+      filtered_force_z_ = force_z_hold_;
+    } else {
+      filtered_force_z_ = new_filtered;
+    }
+    prev_force_z_ = filtered_force_z_;
   }
 
   if (safety_violation_) {
@@ -1070,6 +1190,8 @@ controller_interface::return_type DataCollectionController::updateTeach() {
     calib_rise_position_ = teach_start_position_;
     calib_rise_position_.z() += calib_rise_height_;
     calib_rise_orientation_ = teach_start_orientation_;
+
+    publishStartPos();
 
     RCLCPP_INFO(get_node()->get_logger(),
                 "TEACH trigger: start_pos=[%.4f, %.4f, %.4f], calib_rise_target=[%.4f, %.4f, %.4f]",
@@ -1355,8 +1477,8 @@ controller_interface::return_type DataCollectionController::updateCalibrate() {
 
 controller_interface::return_type DataCollectionController::updateApproach() {
   Eigen::Vector3d target_pos(
-      teach_start_position_.x() + collection_dx_,
-      teach_start_position_.y() + collection_dy_,
+      cmd_robot_target_x_,
+      cmd_robot_target_y_,
       slide_base_z_ + approach_height_);
 
   position_d_target_ = target_pos;
@@ -1398,15 +1520,12 @@ controller_interface::return_type DataCollectionController::updateApproach() {
 
     if (timeout && !reached) {
       RCLCPP_WARN(get_node()->get_logger(),
-                  "APPROACH timeout after %.1fs (dist=%.4f, pos=[%.4f, %.4f, %.4f], target=[%.4f, %.4f, %.4f], force_z=%.3f). Proceeding to DESCEND.",
-                  elapsed / 1000.0, dist,
-                  current_pos.x(), current_pos.y(), current_pos.z(),
-                  target_pos.x(), target_pos.y(), target_pos.z(),
-                  filtered_force_z_);
+                  "APPROACH timeout after %.1fs (dist=%.4f). Proceeding to DESCEND.",
+                  elapsed / 1000.0, dist);
     } else {
       RCLCPP_INFO(get_node()->get_logger(),
-                  "APPROACH -> DESCEND (target=[%.4f, %.4f, %.4f], baseline_force=%.3f)",
-                  target_pos.x(), target_pos.y(), target_pos.z(), baseline_force_z_);
+                  "APPROACH -> DESCEND (target=[%.4f, %.4f], baseline_force=%.3f)",
+                  target_pos.x(), target_pos.y(), baseline_force_z_);
     }
   }
 
@@ -1430,18 +1549,19 @@ controller_interface::return_type DataCollectionController::updateDescend() {
   double force_change = std::abs(filtered_force_z_ - baseline_force_z_);
   double descended = std::abs(position.z() - descend_start_z_);
 
-  if (force_change >= collection_f0_ || descended >= max_descend_distance_) {
+  if (force_change >= cmd_active_.f0 || descended >= max_descend_distance_) {
     phase_ = Phase::SLIDE;
     slide_base_z_ = position.z();
     position_d_target_.z() = slide_base_z_;
     position_d_.z() = slide_base_z_;
     force_error_integral_ = 0.0;
     z_offset_ = 0.0;
+    current_smooth_v_ = 0.0;
 
     slide_start_xy_ = Eigen::Vector3d(position.x(), position.y(), slide_base_z_);
     slide_target_xy_ = Eigen::Vector3d(
-        teach_start_position_.x() + collection_dx_ + collection_dx_step_,
-        teach_start_position_.y() + collection_dy_ + collection_dy_step_,
+        cmd_robot_target_x_,
+        cmd_robot_target_y_,
         slide_base_z_);
 
     setStiffnessForPhase(Phase::SLIDE);
@@ -1465,6 +1585,7 @@ controller_interface::return_type DataCollectionController::updateSlide() {
 
   if (distance < 0.001) {
     phase_ = Phase::LIFT;
+    current_smooth_v_ = 0.0;
     setStiffnessForPhase(Phase::LIFT);
     RCLCPP_INFO(get_node()->get_logger(),
                 "SLIDE -> LIFT (slide complete, target reached)");
@@ -1472,13 +1593,18 @@ controller_interface::return_type DataCollectionController::updateSlide() {
   }
 
   direction.normalize();
-  double step = std::min(slide_speed_ / 1000.0, distance);
+
+  current_smooth_v_ = vel_filter_alpha_ * cmd_active_.v0 +
+                      (1.0 - vel_filter_alpha_) * current_smooth_v_;
+
+  double dt = 0.001;
+  double step = std::min(current_smooth_v_ * dt, distance);
 
   position_d_target_.x() += direction.x() * step;
   position_d_target_.y() += direction.y() * step;
 
-  double force_error = collection_f0_ - std::abs(filtered_force_z_ - baseline_force_z_);
-  force_error_integral_ += force_error / 1000.0;
+  double force_error = cmd_active_.f0 - std::abs(filtered_force_z_ - baseline_force_z_);
+  force_error_integral_ += force_error * dt;
   force_error_integral_ = std::max(std::min(force_error_integral_, 0.05), -0.05);
   z_offset_ = force_kp_ * force_error + force_ki_ * force_error_integral_;
   position_d_target_.z() = slide_base_z_ + z_offset_;
@@ -1498,11 +1624,12 @@ controller_interface::return_type DataCollectionController::updateSlide() {
     Eigen::Vector3d pos = transform.translation();
 
     RCLCPP_INFO(get_node()->get_logger(),
-                "[SLIDE] pos=[%.4f, %.4f, %.4f] target_xy=[%.4f, %.4f] "
-                "force_z=%.3f z_offset=%.4f dist=%.4f",
+                "[SLIDE] pos=[%.4f, %.4f, %.4f] target=[%.4f, %.4f] "
+                "force_z=%.3f z_offset=%.4f dist=%.4f v_smooth=%.4f v0=%.4f",
                 pos.x(), pos.y(), pos.z(),
                 target_xy.x(), target_xy.y(),
-                filtered_force_z_, z_offset_, distance);
+                filtered_force_z_, z_offset_, distance,
+                current_smooth_v_, cmd_active_.v0);
   }
 
   return controller_interface::return_type::OK;
@@ -1529,6 +1656,8 @@ controller_interface::return_type DataCollectionController::updateLift() {
     force_error_integral_ = 0.0;
     z_offset_ = 0.0;
 
+    publishTaskEvent(0, current_task_name_);
+
     std_msgs::msg::Bool completion_msg;
     completion_msg.data = true;
     completion_publisher_->publish(completion_msg);
@@ -1551,7 +1680,19 @@ controller_interface::return_type DataCollectionController::updateWaitParams() {
   if (collection_params_received_) {
     collection_params_received_ = false;
 
-    if (collection_switch_area_) {
+    const CollectionCmd* cmd = cmd_buffer_.readFromRT();
+    if (cmd) {
+      cmd_active_ = *cmd;
+    }
+    const char* tn = cmd_task_name_.load();
+    if (tn) {
+      current_task_name_ = tn;
+    }
+
+    cmd_robot_target_x_ = teach_start_position_.x() + cmd_active_.board_x;
+    cmd_robot_target_y_ = teach_start_position_.y() + cmd_active_.board_y;
+
+    if (cmd_active_.switch_phase) {
       auto pose_matrix = franka_robot_model_->getPoseMatrix(franka::Frame::kEndEffector);
       Eigen::Affine3d transform(Eigen::Matrix4d::Map(pose_matrix.data()));
       Eigen::Vector3d current_pos = transform.translation();
@@ -1560,8 +1701,8 @@ controller_interface::return_type DataCollectionController::updateWaitParams() {
       area_rise_target_.z() = slide_base_z_ + area_rise_height_;
 
       area_move_target_ = Eigen::Vector3d(
-          collection_target_x_,
-          collection_target_y_,
+          cmd_robot_target_x_,
+          cmd_robot_target_y_,
           slide_base_z_ + area_rise_height_);
 
       phase_ = Phase::AREA_RISE;
@@ -1569,9 +1710,11 @@ controller_interface::return_type DataCollectionController::updateWaitParams() {
       initImpedanceState();
 
       RCLCPP_INFO(get_node()->get_logger(),
-                  "WAIT_PARAMS -> AREA_RISE (switch area to [%.4f, %.4f], rise to z=%.4f)",
-                  collection_target_x_, collection_target_y_,
-                  area_rise_target_.z());
+                  "WAIT_PARAMS -> AREA_RISE: board=[%.4f, %.4f] -> robot=[%.4f, %.4f], "
+                  "F_0=%.2f, v_0=%.4f",
+                  cmd_active_.board_x, cmd_active_.board_y,
+                  cmd_robot_target_x_, cmd_robot_target_y_,
+                  cmd_active_.f0, cmd_active_.v0);
     } else {
       phase_ = Phase::APPROACH;
       setStiffnessForPhase(Phase::APPROACH);
@@ -1579,9 +1722,11 @@ controller_interface::return_type DataCollectionController::updateWaitParams() {
       approach_start_cycle_ = 0;
 
       RCLCPP_INFO(get_node()->get_logger(),
-                  "WAIT_PARAMS -> APPROACH (dx=%.4f dy=%.4f dx_step=%.4f dy_step=%.4f F0=%.2f)",
-                  collection_dx_, collection_dy_, collection_dx_step_,
-                  collection_dy_step_, collection_f0_);
+                  "WAIT_PARAMS -> APPROACH: board=[%.4f, %.4f] -> robot=[%.4f, %.4f], "
+                  "F_0=%.2f, v_0=%.4f",
+                  cmd_active_.board_x, cmd_active_.board_y,
+                  cmd_robot_target_x_, cmd_robot_target_y_,
+                  cmd_active_.f0, cmd_active_.v0);
     }
   }
 
@@ -1657,8 +1802,8 @@ controller_interface::return_type DataCollectionController::updateAreaMove() {
 
 controller_interface::return_type DataCollectionController::updateAreaDescend() {
   Eigen::Vector3d target_pos(
-      collection_target_x_ + collection_dx_,
-      collection_target_y_ + collection_dy_,
+      cmd_robot_target_x_,
+      cmd_robot_target_y_,
       slide_base_z_);
 
   position_d_target_ = target_pos;

@@ -63,10 +63,13 @@ def generate_data_collection_nodes(context):
 
     skip_grasp = LaunchConfiguration('skip_grasp').perform(context).lower() == 'true'
     skip_calibrate = LaunchConfiguration('skip_calibrate').perform(context).lower() == 'true'
+    skip_teach_init = LaunchConfiguration('skip_teach_init').perform(context).lower() == 'true'
     calib_file = LaunchConfiguration('calib_file').perform(context)
+    start_pos_file = LaunchConfiguration('start_pos_file').perform(context)
 
     yaml_content = _inject_yaml_param(yaml_content, 'skip_grasp', skip_grasp)
     yaml_content = _inject_yaml_param(yaml_content, 'skip_calibrate', skip_calibrate)
+    yaml_content = _inject_yaml_param(yaml_content, 'skip_teach_init', skip_teach_init)
 
     if skip_calibrate and calib_file and os.path.isfile(calib_file):
         try:
@@ -84,6 +87,24 @@ def generate_data_collection_nodes(context):
         except Exception as e:
             print(f'[launch] WARNING: Failed to read calib_file {calib_file}: {e}')
 
+    if skip_teach_init and start_pos_file and os.path.isfile(start_pos_file):
+        try:
+            with open(start_pos_file, 'r') as f:
+                start_pos_data = json.load(f)
+            cart_pos = start_pos_data.get('cartesian_position', {})
+            start_pos_x = cart_pos.get('x', 0.0)
+            start_pos_y = cart_pos.get('y', 0.0)
+            start_pos_z = cart_pos.get('z', 0.0)
+            joint_angles = start_pos_data.get('joint_angles', [0.0]*7)
+            yaml_content = _inject_yaml_param(yaml_content, 'start_pos_x', start_pos_x)
+            yaml_content = _inject_yaml_param(yaml_content, 'start_pos_y', start_pos_y)
+            yaml_content = _inject_yaml_param(yaml_content, 'start_pos_z', start_pos_z)
+            yaml_content = _inject_yaml_param(yaml_content, 'start_joint_angles', joint_angles)
+            print(f'[launch] Loaded start pos from {start_pos_file}: '
+                  f'pos=[{start_pos_x:.4f}, {start_pos_y:.4f}, {start_pos_z:.4f}]')
+        except Exception as e:
+            print(f'[launch] WARNING: Failed to read start_pos_file {start_pos_file}: {e}')
+
     temp_yaml_fd, temp_yaml_path = tempfile.mkstemp(suffix='.yaml', prefix='serl_franka_')
     with os.fdopen(temp_yaml_fd, 'w') as f:
         f.write(yaml_content)
@@ -95,16 +116,6 @@ def generate_data_collection_nodes(context):
     area_name = LaunchConfiguration('area_name').perform(context)
     runs_dir = LaunchConfiguration('runs_dir').perform(context)
     collection_config = LaunchConfiguration('collection_config').perform(context)
-    board_origin_str = LaunchConfiguration('board_origin').perform(context)
-
-    board_origin = [0.0, 0.0, 0.0]
-    if board_origin_str:
-        try:
-            board_origin = [float(x.strip()) for x in board_origin_str.split(',')]
-            while len(board_origin) < 3:
-                board_origin.append(0.0)
-        except ValueError:
-            pass
 
     nodes = [
         Node(
@@ -168,6 +179,7 @@ def generate_data_collection_nodes(context):
                 'runs_dir': runs_dir,
                 'area_name': area_name,
                 'calib_file': calib_file,
+                'start_pos_file': start_pos_file,
             }],
             output='screen',
         ),
@@ -215,18 +227,21 @@ def generate_launch_description():
         DeclareLaunchArgument('skip_calibrate',
                               default_value='false',
                               description='Skip calibration phase, go directly to WAIT_PARAMS after TEACH trigger'),
+        DeclareLaunchArgument('skip_teach_init',
+                              default_value='false',
+                              description='Skip teach phase, load start position from start_pos_file'),
         DeclareLaunchArgument('calib_file',
                               default_value='',
                               description='Path to calibration result JSON file (used when skip_calibrate=true)'),
+        DeclareLaunchArgument('start_pos_file',
+                              default_value='',
+                              description='Path to start position JSON file (used when skip_teach_init=true)'),
         DeclareLaunchArgument('area_name',
                               default_value='default',
                               description='Name prefix for recorded data files'),
         DeclareLaunchArgument('collection_config',
                               default_value='',
                               description='Path to collection config JSON file (e.g. calibration board definition)'),
-        DeclareLaunchArgument('board_origin',
-                              default_value='0.0,0.0,0.0',
-                              description='Board origin position in robot base frame as x,y,z (meters)'),
     ]
 
     return LaunchDescription(launch_args + [OpaqueFunction(function=generate_data_collection_nodes)])

@@ -129,11 +129,10 @@
       calib_home_k_gains: [600.0, 600.0, 600.0, 600.0, 250.0, 150.0, 50.0]
       calib_home_d_gains: [50.0, 50.0, 50.0, 50.0, 30.0, 25.0, 15.0]
       calib_home_motion_duration: 5.0
-      default_dx: 0.01
-      default_dy: 0.0
-      default_dx_step: 0.01
-      default_dy_step: 0.0
       default_f0: 1.0
+      default_v0: 0.01
+      vel_filter_alpha: 0.05
+      force_spike_threshold: 5.0
       target_force: 1.0
       descend_speed: 0.005
       slide_speed: 0.01
@@ -145,8 +144,13 @@
       area_rise_height: 0.05
       skip_grasp: false
       skip_calibrate: false
+      skip_teach_init: false
       payload_mass: 0.0
       payload_com: [0.0, 0.0, 0.0]
+      start_pos_x: 0.0
+      start_pos_y: 0.0
+      start_pos_z: 0.0
+      start_joint_angles: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
       translational_stiffness_xy: 2000.0
       translational_stiffness_z: 1500.0
       rotational_stiffness: 150.0

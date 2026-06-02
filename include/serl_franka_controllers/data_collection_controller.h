@@ -17,6 +17,7 @@
 
 #include <franka/robot_state.h>
 #include <franka_semantic_components/franka_robot_model.hpp>
+#include <realtime_tools/realtime_buffer.hpp>
 #include <realtime_tools/realtime_publisher.hpp>
 #include <serl_franka_controllers/pseudo_inversion.h>
 
@@ -140,6 +141,11 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   void teachTriggerCallback(const std_msgs::msg::Bool::SharedPtr msg);
   void collectionParamsCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg);
   void resetCallback(const std_msgs::msg::Bool::SharedPtr msg);
+  void taskNameCallback(const std_msgs::msg::String::SharedPtr msg);
+
+  void publishStartPos();
+  void publishTaskEvent(int event_type, const std::string& task_name);
+  void loadStartPosFromParams();
 
   std::unique_ptr<franka_semantic_components::FrankaRobotModel> franka_robot_model_;
 
@@ -243,24 +249,40 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   Eigen::Vector3d payload_com_ = Eigen::Vector3d::Zero();
   bool skip_grasp_ = false;
   bool skip_calibrate_ = false;
+  bool skip_teach_init_ = false;
   bool calib_loaded_from_params_ = false;
   int calib_publish_delay_ = 0;
 
-  double default_dx_ = 0.01;
-  double default_dy_ = 0.0;
-  double default_dx_step_ = 0.01;
-  double default_dy_step_ = 0.0;
-  double default_f0_ = 1.0;
+  std::string current_task_name_;
 
-  double collection_dx_ = 0.01;
-  double collection_dy_ = 0.0;
-  double collection_dx_step_ = 0.01;
-  double collection_dy_step_ = 0.0;
-  double collection_f0_ = 1.0;
+  double default_f0_ = 1.0;
+  double default_v0_ = 0.01;
+
+  struct CollectionCmd {
+    double board_x = 0.0;
+    double board_y = 0.0;
+    double f0 = 1.0;
+    double v0 = 0.01;
+    bool switch_phase = false;
+  };
+  CollectionCmd cmd_active_;
+  realtime_tools::RealtimeBuffer<CollectionCmd> cmd_buffer_;
+
+  double cmd_robot_target_x_ = 0.0;
+  double cmd_robot_target_y_ = 0.0;
+
+  std::atomic<const char*> cmd_task_name_{nullptr};
+  std::string cmd_task_name_storage_;
+
+  double current_smooth_v_ = 0.0;
+  double vel_filter_alpha_ = 0.05;
+
+  double force_spike_threshold_ = 5.0;
+  double prev_force_z_ = 0.0;
+  double force_z_hold_ = 0.0;
+  bool force_spike_active_ = false;
+
   bool collection_params_received_ = false;
-  bool collection_switch_area_ = false;
-  double collection_target_x_ = 0.0;
-  double collection_target_y_ = 0.0;
   double area_rise_height_ = 0.05;
   Eigen::Vector3d area_rise_target_;
   Eigen::Vector3d area_move_target_;
@@ -295,6 +317,8 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> payload_com_publisher_;
   std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> calib_result_publisher_;
   std::shared_ptr<rclcpp::Publisher<sensor_msgs::msg::JointState>> rt_state_publisher_;
+  std::shared_ptr<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>> start_pos_publisher_;
+  std::shared_ptr<rclcpp::Publisher<std_msgs::msg::String>> task_event_publisher_;
 
   rclcpp_action::Client<franka_msgs::action::Grasp>::SharedPtr grasp_client_;
   rclcpp_action::Client<franka_msgs::action::Move>::SharedPtr move_client_;
@@ -304,6 +328,8 @@ class DataCollectionController : public controller_interface::ControllerInterfac
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr teach_trigger_subscriber_;
   rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr collection_params_subscriber_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr reset_subscriber_;
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr task_name_subscriber_;
+  std::string incoming_task_name_;
 };
 
 }  // namespace serl_franka_controllers
